@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/trycua/cua/compare/lume-v0.5.1...lume-v0.5.2) (2026-08-03)
+
+
+### Bug Fixes
+
+* **lume:** bound stalled ARP lookups ([#2710](https://github.com/trycua/cua/issues/2710)) ([a410c7a](https://github.com/trycua/cua/commit/a410c7ab7e83a254604082628e705fa1580b5ca8))
+
 ## [0.5.1](https://github.com/trycua/cua/compare/lume-v0.5.0...lume-v0.5.1) (2026-07-31)
 
 
