@@ -1042,6 +1042,7 @@ dependencies = [
  "base64",
  "cua-driver-contract",
  "futures-util",
+ "http",
  "image",
  "jsonschema",
  "libc",
