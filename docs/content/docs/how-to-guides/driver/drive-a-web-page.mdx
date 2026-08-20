@@ -274,8 +274,13 @@ get_browser_state({
 
 Use `query` to find matching roles, accessible names, or visible text. Use a
 current `scope_ref` to inspect one semantic subtree when names repeat in
-different regions. A continuation is single-use; a newer snapshot invalidates
-it.
+different regions. When the ref identifies content inside a repeated container,
+combine `scope_ref`, `scope_ancestor_role`, and `query` to select the nearest
+strict same-frame ancestor with that accessibility role. Verify the returned
+`snapshot.scope_anchor` before using the scoped refs. An unprovable or changed
+scope returns `browser_scope_unavailable` or `browser_ref_stale`; it never falls
+back to a page-wide query. A continuation is single-use; a newer snapshot
+invalidates it.
 
 Refs are valid only for that session, target, tab, document, frame, and latest
 snapshot. Take a fresh snapshot after navigation or whenever a call returns

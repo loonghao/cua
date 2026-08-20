@@ -180,6 +180,7 @@ pub enum ToolRefusalCode {
     BrowserReconnectExhausted,
     BrowserInputIncomplete,
     BrowserActionUnavailable,
+    BrowserScopeUnavailable,
     BrowserOriginOutsideScope,
     Other,
 }
@@ -203,6 +204,7 @@ impl ToolRefusalCode {
             Self::BrowserReconnectExhausted => "browser_reconnect_exhausted",
             Self::BrowserInputIncomplete => "browser_input_incomplete",
             Self::BrowserActionUnavailable => "browser_action_unavailable",
+            Self::BrowserScopeUnavailable => "browser_scope_unavailable",
             Self::BrowserOriginOutsideScope => "browser_origin_outside_scope",
             Self::Other => "other",
         }
@@ -229,6 +231,7 @@ impl ToolRefusalCode {
             Some("browser_reconnect_exhausted") => Self::BrowserReconnectExhausted,
             Some("browser_input_incomplete") => Self::BrowserInputIncomplete,
             Some("browser_action_unavailable") => Self::BrowserActionUnavailable,
+            Some("browser_scope_unavailable") => Self::BrowserScopeUnavailable,
             Some("browser_origin_outside_scope") => Self::BrowserOriginOutsideScope,
             Some(_) | None => Self::Other,
         }
@@ -254,6 +257,7 @@ impl From<crate::browser::refusal::BrowserRefusalCode> for ToolRefusalCode {
             BrowserRefusalCode::BrowserReconnectExhausted => Self::BrowserReconnectExhausted,
             BrowserRefusalCode::BrowserInputIncomplete => Self::BrowserInputIncomplete,
             BrowserRefusalCode::BrowserActionUnavailable => Self::BrowserActionUnavailable,
+            BrowserRefusalCode::BrowserScopeUnavailable => Self::BrowserScopeUnavailable,
             BrowserRefusalCode::BrowserOriginOutsideScope => Self::BrowserOriginOutsideScope,
         }
     }
@@ -1383,6 +1387,7 @@ mod observation_tests {
             BrowserRefusalCode::BrowserReconnectExhausted,
             BrowserRefusalCode::BrowserInputIncomplete,
             BrowserRefusalCode::BrowserActionUnavailable,
+            BrowserRefusalCode::BrowserScopeUnavailable,
         ] {
             assert_eq!(ToolRefusalCode::from(code).as_str(), code.as_str());
         }
