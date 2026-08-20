@@ -309,6 +309,7 @@ pub enum RefusalCode {
     BrowserWrongTargetRefused,
     BrowserTabNotFound,
     BrowserRefStale,
+    BrowserScopeUnavailable,
     BrowserInputTrustUnavailable,
     BrowserConsentRequired,
     BrowserConsentRevoked,
@@ -331,6 +332,7 @@ impl RefusalCode {
             "browser_wrong_target_refused" => Some(Self::BrowserWrongTargetRefused),
             "browser_tab_not_found" => Some(Self::BrowserTabNotFound),
             "browser_ref_stale" => Some(Self::BrowserRefStale),
+            "browser_scope_unavailable" => Some(Self::BrowserScopeUnavailable),
             "browser_input_trust_unavailable" => Some(Self::BrowserInputTrustUnavailable),
             "browser_consent_required" => Some(Self::BrowserConsentRequired),
             "browser_consent_revoked" => Some(Self::BrowserConsentRevoked),
@@ -1845,6 +1847,10 @@ mod tests {
         assert_eq!(
             RefusalCode::from_driver_code("background_unavailable"),
             Some(RefusalCode::BackgroundUnavailable)
+        );
+        assert_eq!(
+            RefusalCode::from_driver_code("browser_scope_unavailable"),
+            Some(RefusalCode::BrowserScopeUnavailable)
         );
         assert_eq!(RefusalCode::from_driver_code("background_timeout"), None);
     }
