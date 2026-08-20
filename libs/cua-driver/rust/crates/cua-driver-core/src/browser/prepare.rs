@@ -27,6 +27,28 @@ use super::BrowserEngine;
 const PROFILE_MARKER: &str = ".cua-driver-owned-profile.json";
 const PROFILE_SCHEMA: &str = "cua-driver-browser-profile-v1";
 
+async fn claim_responsive_existing_profile_socket(
+    pool: &super::cdp_ws::CdpPool,
+    ws_url: &str,
+    generation: u64,
+) -> anyhow::Result<Arc<super::cdp_ws::CdpConnection>> {
+    let connection = pool.claim_existing(ws_url, generation).await?;
+    if let Err(error) = connection
+        .call(None, "Target.getTargets", serde_json::json!({}))
+        .await
+    {
+        // Chrome approval-only mode can complete the WebSocket handshake yet
+        // leave that socket unable to answer CDP. Do not publish such a
+        // connection as prepared. Evict it so the existing bounded retry
+        // performs one genuinely fresh, consent-aware dial.
+        pool.evict(ws_url).await;
+        return Err(anyhow::anyhow!(
+            "the approved browser socket did not answer its liveness probe: {error}"
+        ));
+    }
+    Ok(connection)
+}
+
 fn validate_profile(profile: &PrepareProfile) -> Result<(), BrowserRefusal> {
     match profile.mode {
         PrepareProfileMode::IsolatedNew => {
@@ -1099,7 +1121,11 @@ impl BrowserEngine {
             }
         }
         let (claimed, displayed_consent_prompt) = match claim_with_delayed_consent(
-            self.pool.claim_existing(&endpoint.ws_url, grant.generation),
+            claim_responsive_existing_profile_socket(
+                &self.pool,
+                &endpoint.ws_url,
+                grant.generation,
+            ),
             self.platform
                 .handle_existing_profile_consent(BrowserConsentRequest {
                     pid,
@@ -1139,7 +1165,11 @@ impl BrowserEngine {
         // each genuinely new browser-level socket, the one fresh dial handles
         // one exact browser-owned prompt against the same PID and window.
         let retry = claim_with_delayed_consent(
-            self.pool.claim_existing(&endpoint.ws_url, grant.generation),
+            claim_responsive_existing_profile_socket(
+                &self.pool,
+                &endpoint.ws_url,
+                grant.generation,
+            ),
             self.platform
                 .handle_existing_profile_consent(BrowserConsentRequest {
                     pid,
@@ -1254,6 +1284,7 @@ impl BrowserEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::mock_cdp::{MockCdpServer, MockReply};
 
     struct DropSignal(Arc<std::sync::atomic::AtomicBool>);
 
@@ -1261,6 +1292,40 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+    }
+
+    #[tokio::test]
+    async fn unresponsive_claim_is_evicted_before_the_one_fresh_probe() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler_calls = calls.clone();
+        let server = MockCdpServer::start(Arc::new(move |call| {
+            assert_eq!(call.method, "Target.getTargets");
+            if handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                MockReply::method_not_found("Target.getTargets")
+            } else {
+                MockReply::ok(serde_json::json!({"targetInfos": []}))
+            }
+        }))
+        .await;
+        let pool = super::super::cdp_ws::CdpPool::new();
+        let url = server.ws_url();
+
+        let first = claim_responsive_existing_profile_socket(&pool, &url, 1).await;
+        assert!(
+            first.is_err(),
+            "an unusable handshake must not count as prepared"
+        );
+        assert!(
+            pool.get_existing(&url, 1).await.is_err(),
+            "the unusable socket must be evicted before retry"
+        );
+
+        let second = claim_responsive_existing_profile_socket(&pool, &url, 1)
+            .await
+            .expect("the one fresh socket should pass its CDP liveness proof");
+        assert!(!second.is_closed());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        pool.release_existing(&url, 1).await;
     }
 
     #[tokio::test]
