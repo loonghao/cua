@@ -23,6 +23,27 @@ struct ConsentButtonCandidate {
     has_keyboard_focus: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeConsentActionEvidence {
+    allow_element_ptr: usize,
+    prompt_hwnd: u64,
+    same_pid: bool,
+    live: bool,
+    visible: bool,
+    enabled: bool,
+    owner_reaches_target: bool,
+    z_order_rank: Option<usize>,
+}
+
+fn select_unique_target_owned_topmost(
+    _actions: &[NativeConsentActionEvidence],
+) -> Result<usize, BrowserRefusal> {
+    Err(refusal(
+        BrowserRefusalCode::BrowserWrongTargetRefused,
+        "multiple native Chromium consent actions are not yet disambiguated",
+    ))
+}
+
 fn refusal(code: BrowserRefusalCode, message: impl Into<String>) -> BrowserRefusal {
     BrowserRefusal::new(code, message)
 }
@@ -591,6 +612,34 @@ mod tests {
                 .code,
             BrowserRefusalCode::BrowserWrongTargetRefused
         );
+    }
+
+    #[test]
+    fn matcher_selects_the_unique_topmost_target_owned_native_prompt() {
+        let actions = [
+            NativeConsentActionEvidence {
+                allow_element_ptr: 112,
+                prompt_hwnd: 12787906,
+                same_pid: true,
+                live: true,
+                visible: true,
+                enabled: true,
+                owner_reaches_target: true,
+                z_order_rank: Some(4),
+            },
+            NativeConsentActionEvidence {
+                allow_element_ptr: 212,
+                prompt_hwnd: 860798,
+                same_pid: true,
+                live: true,
+                visible: true,
+                enabled: true,
+                owner_reaches_target: true,
+                z_order_rank: Some(5),
+            },
+        ];
+
+        assert_eq!(select_unique_target_owned_topmost(&actions).unwrap(), 112);
     }
 
     #[test]
