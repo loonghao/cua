@@ -29,7 +29,7 @@ use super::pointer::BrowserPointerTool;
 use super::refusal::BrowserRefusal;
 use super::tools::{
     browser_protected_resource_scope, BrowserClickTool, BrowserNavigateTool, BrowserPrepareTool,
-    BrowserTypeTool, GetBrowserStateTool,
+    BrowserSetInputFilesTool, BrowserTypeTool, GetBrowserStateTool,
 };
 use super::types::{
     BrowserClassification, BrowserEngineFamily, BrowserProcessRole, BrowserProduct,
@@ -60,6 +60,8 @@ struct FixtureState {
     semantic_full_dom_fails: bool,
     semantic_full_dom_times_out: bool,
     semantic_truncated_dom: bool,
+    hidden_file_input: bool,
+    ambiguous_hidden_file_input: bool,
     screenshot_data: String,
     viewport_css_width: f64,
     viewport_css_height: f64,
@@ -87,6 +89,8 @@ impl Default for FixtureState {
             semantic_full_dom_fails: false,
             semantic_full_dom_times_out: false,
             semantic_truncated_dom: false,
+            hidden_file_input: false,
+            ambiguous_hidden_file_input: false,
             screenshot_data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZJrAAAAAASUVORK5CYII=".into(),
             viewport_css_width: 800.0,
             viewport_css_height: 600.0,
@@ -190,6 +194,58 @@ fn main_document() -> Value {
             }]
         }
     })
+}
+
+fn hidden_file_input_document(ambiguous: bool) -> Value {
+    let mut children = vec![
+        json!({
+            "nodeType": 1,
+            "nodeName": "LABEL",
+            "backendNodeId": 50,
+            "attributes": ["for", "package-file", "aria-label", "Choose package"],
+        }),
+        json!({
+            "nodeType": 1,
+            "nodeName": "INPUT",
+            "backendNodeId": 51,
+            "attributes": ["id", "package-file", "type", "file", "style", "display:none"],
+        }),
+    ];
+    if ambiguous {
+        children.push(json!({
+            "nodeType": 1,
+            "nodeName": "INPUT",
+            "backendNodeId": 52,
+            "attributes": ["id", "package-file", "type", "file", "style", "display:none"],
+        }));
+    }
+    json!({
+        "root": {
+            "nodeType": 9,
+            "nodeName": "#document",
+            "documentURL": "https://fixture.test/store",
+            "frameId": "F_MAIN",
+            "children": [{
+                "nodeType": 1,
+                "nodeName": "HTML",
+                "backendNodeId": 1,
+                "children": children
+            }]
+        }
+    })
+}
+
+fn hidden_file_input_ax_tree(frame_id: &str) -> Value {
+    if frame_id != "F_MAIN" {
+        return json!({"nodes": []});
+    }
+    json!({"nodes": [
+        {"nodeId": "root", "ignored": false, "role": {"value": "RootWebArea"},
+         "childIds": ["chooser"]},
+        {"nodeId": "chooser", "parentId": "root", "ignored": false,
+         "backendDOMNodeId": 50, "role": {"value": "button"},
+         "name": {"value": "Choose package"}, "childIds": []}
+    ]})
 }
 
 /// Large application document used to prove that hidden retained controls do
@@ -641,7 +697,9 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 } else if st.semantic_truncated_dom && depth == 8 {
                     MockReply::ok(truncated_semantic_document())
                 } else {
-                    MockReply::ok(if st.semantic_scoped_rows {
+                    MockReply::ok(if st.hidden_file_input {
+                        hidden_file_input_document(st.ambiguous_hidden_file_input)
+                    } else if st.semantic_scoped_rows {
                         scoped_rows_semantic_document("F_MAIN")
                     } else if st.semantic_large_page {
                         large_semantic_document()
@@ -655,6 +713,16 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     "node": large_semantic_document()["root"]["children"][0].clone()
                 }))
             }
+            "DOM.describeNode" if is_tab && call.params["backendNodeId"] == 51 => {
+                MockReply::ok(json!({
+                    "node": {
+                        "nodeType": 1,
+                        "nodeName": "INPUT",
+                        "backendNodeId": 51,
+                        "attributes": ["id", "package-file", "type", "file", "style", "display:none"]
+                    }
+                }))
+            }
             "DOM.getDocument" if is_oopif => MockReply::ok(if st.semantic_scoped_rows {
                 scoped_rows_semantic_document("F_OOPIF")
             } else {
@@ -662,7 +730,9 @@ fn fixture_handler(state: SharedState) -> MockHandler {
             }),
             "Accessibility.getFullAXTree" if is_tab => {
                 let frame_id = call.params["frameId"].as_str().unwrap_or("F_MAIN");
-                if st.semantic_scoped_rows {
+                if st.hidden_file_input {
+                    MockReply::ok(hidden_file_input_ax_tree(frame_id))
+                } else if st.semantic_scoped_rows {
                     MockReply::ok(scoped_rows_semantic_ax_tree(frame_id))
                 } else if st.semantic_large_page {
                     MockReply::ok(large_semantic_ax_tree(frame_id))
@@ -686,7 +756,12 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 }
             }
             "DOMSnapshot.captureSnapshot" if is_tab => {
-                if st.semantic_scoped_rows {
+                if st.hidden_file_input {
+                    MockReply::ok(semantic_layout_snapshot(
+                        &[50],
+                        &[[10.0, 10.0, 120.0, 36.0]],
+                    ))
+                } else if st.semantic_scoped_rows {
                     MockReply::ok(scoped_rows_layout_snapshot())
                 } else if st.semantic_large_page {
                     let mut backends = vec![999, 2000, 2003, 2010, 2011];
@@ -834,7 +909,8 @@ fn fixture_handler(state: SharedState) -> MockHandler {
             "DOM.focus"
             | "Emulation.setFocusEmulationEnabled"
             | "Input.dispatchMouseEvent"
-            | "Input.insertText" => MockReply::ok(json!({})),
+            | "Input.insertText"
+            | "DOM.setFileInputFiles" => MockReply::ok(json!({})),
             "DOM.resolveNode" => MockReply::ok(json!({
                 "object": { "objectId": format!("obj-{}", call.params["backendNodeId"]) }
             })),
@@ -2294,6 +2370,84 @@ async fn semantic_refs_enforce_declared_action_kinds_before_delivery() {
     );
     assert!(recorded_calls(&f, "Input.insertText").is_empty());
     assert!(recorded_calls(&f, "Runtime.callFunctionOn").is_empty());
+}
+
+#[tokio::test]
+async fn semantic_upload_uses_only_one_explicitly_associated_hidden_file_input() {
+    let f = fixture_with(|state| state.hidden_file_input = true).await;
+    let (target, tab) = bind(&f).await;
+    let snap = semantic_snapshot(&f, &target, &tab).await;
+    let chooser = snap["refs"]
+        .as_array()
+        .and_then(|refs| refs.iter().find(|entry| entry["name"] == "Choose package"))
+        .expect("visible chooser ref");
+    assert!(chooser["actions"]
+        .as_array()
+        .is_some_and(|actions| actions.iter().any(|action| action == "upload")));
+    let chooser_ref = chooser["ref"].as_str().expect("chooser ref");
+    let upload = tempfile::NamedTempFile::new().expect("upload fixture");
+
+    let result = BrowserSetInputFilesTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+            "ref": chooser_ref,
+            "files": [upload.path().to_string_lossy()]
+        }))
+        .await;
+    assert_eq!(
+        structured(&result)["status"],
+        "ok",
+        "{}",
+        structured(&result)
+    );
+    assert_eq!(structured(&result)["ref"], chooser_ref);
+    assert_eq!(structured(&result)["file_count"], 1);
+    assert!(
+        !structured(&result)
+            .to_string()
+            .contains(upload.path().to_string_lossy().as_ref()),
+        "public result must not disclose the local upload path"
+    );
+    let assignments = recorded_calls(&f, "DOM.setFileInputFiles");
+    assert_eq!(assignments.len(), 1, "{assignments:?}");
+    assert_eq!(assignments[0].1["backendNodeId"], 51);
+    assert_eq!(assignments[0].1["files"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn semantic_upload_rejects_ambiguous_hidden_file_input_associations() {
+    let f = fixture_with(|state| {
+        state.hidden_file_input = true;
+        state.ambiguous_hidden_file_input = true;
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let snap = semantic_snapshot(&f, &target, &tab).await;
+    let chooser = snap["refs"]
+        .as_array()
+        .and_then(|refs| refs.iter().find(|entry| entry["name"] == "Choose package"))
+        .expect("visible chooser ref");
+    assert!(chooser["actions"]
+        .as_array()
+        .is_some_and(|actions| actions.iter().all(|action| action != "upload")));
+    let upload = tempfile::NamedTempFile::new().expect("upload fixture");
+    let result = BrowserSetInputFilesTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+            "ref": chooser["ref"],
+            "files": [upload.path().to_string_lossy()]
+        }))
+        .await;
+    assert_eq!(
+        structured(&result)["refusal"]["code"],
+        "browser_action_unavailable"
+    );
+    assert!(recorded_calls(&f, "DOM.describeNode").is_empty());
+    assert!(recorded_calls(&f, "DOM.setFileInputFiles").is_empty());
 }
 
 #[tokio::test]

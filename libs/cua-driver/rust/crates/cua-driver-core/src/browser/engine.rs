@@ -2205,6 +2205,7 @@ impl BrowserEngine {
             };
             entries.push(RefEntry {
                 backend_node_id: c.backend_node_id,
+                upload_backend_node_id: None,
                 node_name: c.node_name,
                 label: c.label,
                 actions: Vec::new(),
@@ -2259,6 +2260,7 @@ impl BrowserEngine {
                             let Some(identity) = identity else { continue };
                             entries.push(RefEntry {
                                 backend_node_id: c.backend_node_id,
+                                upload_backend_node_id: None,
                                 node_name: c.node_name,
                                 label: c.label,
                                 actions: Vec::new(),
