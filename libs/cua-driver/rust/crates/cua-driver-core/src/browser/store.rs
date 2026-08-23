@@ -150,6 +150,11 @@ pub struct RefEntry {
     /// named by `frame.oopif_target_id`.
     #[serde(skip_serializing)]
     pub backend_node_id: i64,
+    /// Exact file input selected when a visible semantic chooser is explicitly
+    /// and uniquely associated with one `<input type=file>` (usually hidden).
+    /// Legacy refs and direct file-input refs can use `backend_node_id`.
+    #[serde(skip_serializing)]
+    pub upload_backend_node_id: Option<i64>,
     pub node_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -505,6 +510,7 @@ mod tests {
                 0,
                 RefEntry {
                     backend_node_id: 555,
+                    upload_backend_node_id: None,
                     node_name: "button".into(),
                     label: Some("Submit".into()),
                     actions: Vec::new(),
