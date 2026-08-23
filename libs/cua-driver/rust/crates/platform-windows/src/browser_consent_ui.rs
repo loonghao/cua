@@ -10,7 +10,11 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{
     IUIAutomationElement, IUIAutomationInvokePattern, UIA_InvokePatternId,
 };
-use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetTopWindow, GetWindow, GetWindowThreadProcessId, IsWindow, IsWindowVisible, GW_HWNDNEXT,
+    GW_OWNER,
+};
 
 use crate::uia::UiaNode;
 
@@ -36,12 +40,65 @@ struct NativeConsentActionEvidence {
 }
 
 fn select_unique_target_owned_topmost(
-    _actions: &[NativeConsentActionEvidence],
+    actions: &[NativeConsentActionEvidence],
 ) -> Result<usize, BrowserRefusal> {
-    Err(refusal(
-        BrowserRefusalCode::BrowserWrongTargetRefused,
-        "multiple native Chromium consent actions are not yet disambiguated",
-    ))
+    if actions.len() < 2
+        || actions.iter().any(|action| {
+            action.prompt_hwnd == 0
+                || !action.same_pid
+                || !action.live
+                || !action.visible
+                || !action.enabled
+                || !action.owner_reaches_target
+                || action.z_order_rank.is_none()
+        })
+    {
+        return Err(refusal(
+            BrowserRefusalCode::BrowserWrongTargetRefused,
+            "multiple native Chromium consent actions lacked complete target-owned window proof",
+        ));
+    }
+
+    for (index, action) in actions.iter().enumerate() {
+        let remaining = &actions[(index + 1)..];
+        if remaining.iter().any(|other| {
+            action.allow_element_ptr == other.allow_element_ptr
+                && action.prompt_hwnd != other.prompt_hwnd
+        }) {
+            return Err(refusal(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "multiple native Chromium consent windows shared one UI Automation action identity",
+            ));
+        }
+        if remaining.iter().any(|other| {
+            action.prompt_hwnd == other.prompt_hwnd
+                && action.allow_element_ptr != other.allow_element_ptr
+        }) {
+            return Err(refusal(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "one native Chromium consent window exposed multiple structural allow actions",
+            ));
+        }
+    }
+
+    let top_rank = actions
+        .iter()
+        .filter_map(|action| action.z_order_rank)
+        .min()
+        .expect("complete proof above requires a z-order rank");
+    let mut topmost = actions
+        .iter()
+        .filter(|action| action.z_order_rank == Some(top_rank));
+    let selected = topmost
+        .next()
+        .expect("the minimum rank came from an action");
+    if topmost.next().is_some() {
+        return Err(refusal(
+            BrowserRefusalCode::BrowserWrongTargetRefused,
+            "multiple native Chromium consent windows shared the highest proven z-order",
+        ));
+    }
+    Ok(selected.allow_element_ptr)
 }
 
 fn refusal(code: BrowserRefusalCode, message: impl Into<String>) -> BrowserRefusal {
@@ -302,17 +359,14 @@ fn select_language_independent_allow(
     Ok(candidates[allow_index].element_ptr)
 }
 
-fn exact_allow_button_with<F>(
+fn structural_allow_actions_with<F>(
     nodes: &[UiaNode],
     mut properties: F,
-) -> Result<Option<usize>, BrowserRefusal>
+) -> Result<Vec<usize>, BrowserRefusal>
 where
     F: FnMut(usize) -> Result<(String, bool), BrowserRefusal>,
 {
     let surfaces = native_prompt_surfaces(nodes);
-    if surfaces.is_empty() {
-        return Ok(None);
-    }
     let mut matches = Vec::new();
     for (start, end) in surfaces {
         let mut candidates = Vec::new();
@@ -345,9 +399,21 @@ where
         }
         matches.push(select_language_independent_allow(&candidates)?);
     }
+    Ok(matches)
+}
+
+fn exact_allow_button_with<F>(
+    nodes: &[UiaNode],
+    properties: F,
+) -> Result<Option<usize>, BrowserRefusal>
+where
+    F: FnMut(usize) -> Result<(String, bool), BrowserRefusal>,
+{
+    let mut matches = structural_allow_actions_with(nodes, properties)?;
     matches.sort_unstable();
     matches.dedup();
     match matches.as_slice() {
+        [] => Ok(None),
         [element] => Ok(Some(*element)),
         _ => Err(refusal(
             BrowserRefusalCode::BrowserWrongTargetRefused,
@@ -356,8 +422,167 @@ where
     }
 }
 
-fn exact_allow_button(nodes: &[UiaNode]) -> Result<Option<usize>, BrowserRefusal> {
-    exact_allow_button_with(nodes, native_button_properties)
+fn native_window_is_exact_target_owned(
+    prompt_hwnd: u64,
+    target_pid: u32,
+    target_hwnd: u64,
+) -> bool {
+    let native = HWND(prompt_hwnd as *mut _);
+    !native.0.is_null()
+        && unsafe { IsWindow(native) }.as_bool()
+        && crate::win32::windows::window_owner_pid(prompt_hwnd) == Some(target_pid)
+        && unsafe { IsWindowVisible(native) }.as_bool()
+        && unsafe { IsWindowEnabled(native) }.as_bool()
+        && crate::win32::windows::owner_chain_reaches_target(target_hwnd, prompt_hwnd, |hwnd| {
+            let owner = unsafe { GetWindow(HWND(hwnd as *mut _), GW_OWNER) }
+                .ok()
+                .unwrap_or_default();
+            (!owner.0.is_null()).then_some(owner.0 as usize as u64)
+        })
+}
+
+fn target_owned_windows_by_z_order(target_pid: u32, target_hwnd: u64) -> Vec<(u64, usize)> {
+    let mut owned = Vec::new();
+    let mut current = unsafe { GetTopWindow(None) }.unwrap_or_default();
+    for rank in 0..65_536 {
+        if current.0.is_null() {
+            break;
+        }
+        let current_id = current.0 as usize as u64;
+        if native_window_is_exact_target_owned(current_id, target_pid, target_hwnd) {
+            owned.push((current_id, rank));
+        }
+        let next = unsafe { GetWindow(current, GW_HWNDNEXT) }.unwrap_or_default();
+        if next.0.is_null() || next == current {
+            break;
+        }
+        current = next;
+    }
+    owned
+}
+
+fn native_consent_action_evidence(
+    allow_element_ptr: usize,
+    prompt_hwnd: u64,
+    target_pid: u32,
+    target_hwnd: u64,
+    z_order_rank: Option<usize>,
+) -> NativeConsentActionEvidence {
+    let native = HWND(prompt_hwnd as *mut _);
+    let live = !native.0.is_null() && unsafe { IsWindow(native) }.as_bool();
+    let same_pid = live && crate::win32::windows::window_owner_pid(prompt_hwnd) == Some(target_pid);
+    let visible = live && unsafe { IsWindowVisible(native) }.as_bool();
+    let enabled = live && unsafe { IsWindowEnabled(native) }.as_bool();
+    let owner_reaches_target = live
+        && crate::win32::windows::owner_chain_reaches_target(target_hwnd, prompt_hwnd, |hwnd| {
+            let owner = unsafe { GetWindow(HWND(hwnd as *mut _), GW_OWNER) }
+                .ok()
+                .unwrap_or_default();
+            (!owner.0.is_null()).then_some(owner.0 as usize as u64)
+        });
+    NativeConsentActionEvidence {
+        allow_element_ptr,
+        prompt_hwnd,
+        same_pid,
+        live,
+        visible,
+        enabled,
+        owner_reaches_target,
+        z_order_rank,
+    }
+}
+
+struct ExactAllowButton {
+    element_ptr: usize,
+    additional_nodes: Vec<UiaNode>,
+}
+
+fn exact_allow_button_from_owned_prompt_windows(
+    target_pid: u32,
+    target_hwnd: u64,
+) -> Result<ExactAllowButton, BrowserRefusal> {
+    let mut candidates = Vec::new();
+    for (prompt_hwnd, z_order_rank) in target_owned_windows_by_z_order(target_pid, target_hwnd) {
+        let tree = crate::uia::walk_tree(prompt_hwnd, None);
+        match exact_allow_button_with(&tree.nodes, native_button_properties) {
+            Ok(Some(element_ptr)) => candidates.push((
+                native_consent_action_evidence(
+                    element_ptr,
+                    prompt_hwnd,
+                    target_pid,
+                    target_hwnd,
+                    Some(z_order_rank),
+                ),
+                tree.nodes,
+            )),
+            Ok(None) => release_nodes(&tree.nodes),
+            Err(error) => {
+                release_nodes(&tree.nodes);
+                for (_, nodes) in &candidates {
+                    release_nodes(nodes);
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    let evidence = candidates
+        .iter()
+        .map(|(evidence, _)| *evidence)
+        .collect::<Vec<_>>();
+    let selected = match select_unique_target_owned_topmost(&evidence) {
+        Ok(selected) => selected,
+        Err(error) => {
+            for (_, nodes) in &candidates {
+                release_nodes(nodes);
+            }
+            return Err(error);
+        }
+    };
+
+    let mut selected_nodes: Option<Vec<UiaNode>> = None;
+    for (evidence, nodes) in candidates {
+        if evidence.allow_element_ptr == selected {
+            if selected_nodes.is_some() {
+                release_nodes(&nodes);
+                if let Some(existing) = selected_nodes.take() {
+                    release_nodes(&existing);
+                }
+                return Err(refusal(
+                    BrowserRefusalCode::BrowserWrongTargetRefused,
+                    "multiple native Chromium consent windows shared one UI Automation action identity",
+                ));
+            }
+            selected_nodes = Some(nodes);
+        } else {
+            release_nodes(&nodes);
+        }
+    }
+    Ok(ExactAllowButton {
+        element_ptr: selected,
+        additional_nodes: selected_nodes.expect("selected evidence retains its exact UIA tree"),
+    })
+}
+
+fn exact_allow_button_for_target(
+    nodes: &[UiaNode],
+    target_pid: u32,
+    target_hwnd: u64,
+) -> Result<Option<ExactAllowButton>, BrowserRefusal> {
+    let mut actions = structural_allow_actions_with(nodes, native_button_properties)?;
+    actions.sort_unstable();
+    actions.dedup();
+    match actions.as_slice() {
+        [] => return Ok(None),
+        [element_ptr] => {
+            return Ok(Some(ExactAllowButton {
+                element_ptr: *element_ptr,
+                additional_nodes: Vec::new(),
+            }));
+        }
+        _ => {}
+    }
+    exact_allow_button_from_owned_prompt_windows(target_pid, target_hwnd).map(Some)
 }
 
 unsafe fn invoke(element_ptr: usize) -> Result<(), BrowserRefusal> {
@@ -412,9 +637,10 @@ pub async fn handle(
             })?;
         let prompt_present = native_prompt_surface_present(&tree.nodes);
         saw_prompt |= prompt_present;
-        match exact_allow_button(&tree.nodes) {
-            Ok(Some(element)) => {
-                let invoked = unsafe { invoke(element) };
+        match exact_allow_button_for_target(&tree.nodes, pid, request.window_id) {
+            Ok(Some(selection)) => {
+                let invoked = unsafe { invoke(selection.element_ptr) };
+                release_nodes(&selection.additional_nodes);
                 release_nodes(&tree.nodes);
                 invoked?;
                 return Ok(BrowserConsentOutcome::Accepted);
@@ -510,6 +736,23 @@ mod tests {
 
     fn properties(element_ptr: usize) -> Result<(String, bool), BrowserRefusal> {
         Ok((CHROMIUM_DIALOG_BUTTON_CLASS.to_owned(), element_ptr == 13))
+    }
+
+    fn native_action(
+        allow_element_ptr: usize,
+        prompt_hwnd: u64,
+        z_order_rank: Option<usize>,
+    ) -> NativeConsentActionEvidence {
+        NativeConsentActionEvidence {
+            allow_element_ptr,
+            prompt_hwnd,
+            same_pid: true,
+            live: true,
+            visible: true,
+            enabled: true,
+            owner_reaches_target: true,
+            z_order_rank,
+        }
     }
 
     #[test]
@@ -617,29 +860,62 @@ mod tests {
     #[test]
     fn matcher_selects_the_unique_topmost_target_owned_native_prompt() {
         let actions = [
-            NativeConsentActionEvidence {
-                allow_element_ptr: 112,
-                prompt_hwnd: 12787906,
-                same_pid: true,
-                live: true,
-                visible: true,
-                enabled: true,
-                owner_reaches_target: true,
-                z_order_rank: Some(4),
-            },
-            NativeConsentActionEvidence {
-                allow_element_ptr: 212,
-                prompt_hwnd: 860798,
-                same_pid: true,
-                live: true,
-                visible: true,
-                enabled: true,
-                owner_reaches_target: true,
-                z_order_rank: Some(5),
-            },
+            native_action(112, 12787906, Some(4)),
+            native_action(212, 860798, Some(5)),
         ];
 
         assert_eq!(select_unique_target_owned_topmost(&actions).unwrap(), 112);
+    }
+
+    #[test]
+    fn matcher_refuses_incomplete_or_non_target_native_prompt_proof() {
+        let mut missing_z_order = [
+            native_action(112, 12787906, None),
+            native_action(212, 860798, Some(5)),
+        ];
+        assert_eq!(
+            select_unique_target_owned_topmost(&missing_z_order)
+                .unwrap_err()
+                .code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+
+        missing_z_order[0].z_order_rank = Some(4);
+        missing_z_order[0].owner_reaches_target = false;
+        assert_eq!(
+            select_unique_target_owned_topmost(&missing_z_order)
+                .unwrap_err()
+                .code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+    }
+
+    #[test]
+    fn matcher_refuses_multiple_allow_actions_for_one_native_prompt_window() {
+        let actions = [
+            native_action(112, 12787906, Some(4)),
+            native_action(212, 12787906, Some(4)),
+        ];
+        assert_eq!(
+            select_unique_target_owned_topmost(&actions)
+                .unwrap_err()
+                .code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+    }
+
+    #[test]
+    fn matcher_refuses_one_uia_action_identity_shared_by_multiple_native_windows() {
+        let actions = [
+            native_action(112, 12787906, Some(4)),
+            native_action(112, 860798, Some(5)),
+        ];
+        assert_eq!(
+            select_unique_target_owned_topmost(&actions)
+                .unwrap_err()
+                .code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
     }
 
     #[test]
