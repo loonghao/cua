@@ -144,20 +144,6 @@ jobs:
           fi
         working-directory: .
 
-      - name: Generate cua-driver docs for drift diagnosis
-        if: failure() && (contains(steps.changed.outputs.generators, 'cua-driver') || steps.changed.outputs.generators == 'all')
-        run: npx tsx scripts/docs-generators/runner.ts --library cua-driver
-
-      - name: Upload generated cua-driver docs
-        if: failure() && (contains(steps.changed.outputs.generators, 'cua-driver') || steps.changed.outputs.generators == 'all')
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
-        with:
-          name: cua-driver-generated-docs
-          if-no-files-found: error
-          path: |
-            docs/content/docs/reference/cua-driver/cli-reference.mdx
-            docs/content/docs/reference/cua-driver/mcp-tools.mdx
-
       - name: Show help if check failed
         if: failure()
         run: |
