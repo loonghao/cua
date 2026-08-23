@@ -324,6 +324,8 @@ where
         }
         matches.push(select_language_independent_allow(&candidates)?);
     }
+    matches.sort_unstable();
+    matches.dedup();
     match matches.as_slice() {
         [element] => Ok(Some(*element)),
         _ => Err(refusal(
