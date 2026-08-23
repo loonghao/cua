@@ -2384,7 +2384,7 @@ impl BrowserSetInputFilesTool {
         Self {
             def: ToolDef {
                 name: "browser_set_input_files".into(),
-                description: "Assign one or more explicit absolute local files to an exact live <input type=file> ref through CDP. This bypasses native file pickers, rejects symlinks and non-regular files, and never returns local paths.".into(),
+                description: "Assign one or more explicit absolute local files to an exact live <input type=file> ref, or to a visible semantic chooser explicitly and uniquely associated with one hidden file input. This bypasses native file pickers, rejects ambiguous associations, symlinks, and non-regular files, and never returns local paths.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -2507,12 +2507,15 @@ impl Tool for BrowserSetInputFilesTool {
             Ok(session) => session,
             Err(refusal) => return refusal.to_tool_result(),
         };
+        let upload_backend_node_id = entry
+            .upload_backend_node_id
+            .unwrap_or(entry.backend_node_id);
         let described = match validated
             .conn
             .call(
                 Some(&cdp_session),
                 "DOM.describeNode",
-                json!({ "backendNodeId": entry.backend_node_id }),
+                json!({ "backendNodeId": upload_backend_node_id }),
             )
             .await
         {
@@ -2550,7 +2553,7 @@ impl Tool for BrowserSetInputFilesTool {
             .call(
                 Some(&cdp_session),
                 "DOM.setFileInputFiles",
-                json!({ "backendNodeId": entry.backend_node_id, "files": files }),
+                json!({ "backendNodeId": upload_backend_node_id, "files": files }),
             )
             .await
         {

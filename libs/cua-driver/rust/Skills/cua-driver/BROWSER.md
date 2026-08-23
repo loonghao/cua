@@ -429,7 +429,11 @@ driver refuses that mode before dispatch; retry explicitly with
 Use a current semantic ref whose `actions` contains `upload`, then call
 `browser_set_input_files` with one to 32 absolute regular-file paths. The tool
 rejects symlinks and directories, bypasses the native file picker, and returns
-only the assigned file count. Paths are redacted from trajectory arguments.
+only the assigned file count. A visible chooser can expose `upload` when its
+DOM label or `aria-controls` relation identifies exactly one enabled file input
+in the same frame and tree scope, including a CSS-hidden input. Duplicate ids,
+multiple candidates, unrelated nearby inputs, and cross-frame or cross-shadow
+associations fail closed. Paths are redacted from trajectory arguments.
 
 ### Downloads
 
