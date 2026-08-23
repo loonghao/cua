@@ -132,7 +132,7 @@ fn post_action_foreground_allowed(relation: PostActionForegroundRelation) -> boo
             || (relation.target_gone && relation.actual_is_prior_owner))
 }
 
-fn owner_chain_reaches_target(
+pub(crate) fn owner_chain_reaches_target(
     target: u64,
     actual: u64,
     mut owner_of: impl FnMut(u64) -> Option<u64>,
