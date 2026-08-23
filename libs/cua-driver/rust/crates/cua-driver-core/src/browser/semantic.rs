@@ -82,6 +82,7 @@ struct DomMeta {
     css_hidden: bool,
     parent_backend_node_id: Option<i64>,
     frame_id: Option<String>,
+    tree_scope: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -115,6 +116,7 @@ pub(crate) struct SemanticNode {
     pub(crate) parent_ax_id: Option<String>,
     pub(crate) child_ax_ids: Vec<String>,
     pub(crate) backend_node_id: Option<i64>,
+    pub(crate) upload_backend_node_id: Option<i64>,
     pub(crate) role: String,
     pub(crate) name: Option<String>,
     pub(crate) value: Option<String>,
@@ -130,6 +132,7 @@ impl SemanticNode {
         let backend_node_id = self.backend_node_id?;
         Some(RefEntry {
             backend_node_id,
+            upload_backend_node_id: self.upload_backend_node_id,
             node_name: self.role.clone(),
             label: self.name.clone(),
             actions: self.actions.clone(),
@@ -715,25 +718,113 @@ impl DomIndex {
     fn shares_dom_branch(&self, left: i64, right: i64) -> bool {
         self.is_ancestor_of(left, right) || self.is_ancestor_of(right, left)
     }
+
+    /// Resolve only normative DOM associations from a visible chooser to one
+    /// enabled file input in the same frame and tree scope. This includes the
+    /// common CSS-hidden input case. Duplicate ids, multiple label descendants,
+    /// cross-frame links, and unrelated nearby inputs all fail closed.
+    fn unique_associated_file_input(&self, source: i64) -> Option<i64> {
+        let source_meta = self.nodes.get(&source)?;
+        if source_meta.css_hidden {
+            return None;
+        }
+
+        let same_scope = |candidate: &DomMeta| {
+            candidate.frame_id == source_meta.frame_id
+                && candidate.tree_scope == source_meta.tree_scope
+        };
+        let is_file_input = |candidate: &DomMeta| {
+            same_scope(candidate)
+                && candidate.tag == "input"
+                && candidate
+                    .attrs
+                    .get("type")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("file"))
+                && !candidate.attrs.contains_key("disabled")
+                && !candidate
+                    .attrs
+                    .get("aria-disabled")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        };
+        let mut candidates = HashSet::new();
+        let id_target = |id: &str| {
+            let matches = self
+                .nodes
+                .iter()
+                .filter(|(_, candidate)| {
+                    same_scope(candidate)
+                        && candidate.attrs.get("id").is_some_and(|value| value == id)
+                })
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [(&backend, candidate)] if is_file_input(candidate) => Some(backend),
+                _ => None,
+            }
+        };
+
+        if let Some(ids) = source_meta.attrs.get("aria-controls") {
+            for id in ids.split_ascii_whitespace().filter(|id| !id.is_empty()) {
+                candidates.extend(id_target(id));
+            }
+        }
+
+        let mut current = Some(source);
+        let mut visited = HashSet::new();
+        while let Some(backend) = current.filter(|backend| visited.insert(*backend)) {
+            let meta = self.nodes.get(&backend)?;
+            if meta.frame_id != source_meta.frame_id || meta.tree_scope != source_meta.tree_scope {
+                return None;
+            }
+            if meta.tag == "label" {
+                if let Some(id) = meta.attrs.get("for").filter(|id| !id.trim().is_empty()) {
+                    let id = id.trim();
+                    if !id.chars().any(char::is_whitespace) {
+                        candidates.extend(id_target(id));
+                    }
+                } else {
+                    for (&candidate_backend, candidate) in &self.nodes {
+                        if is_file_input(candidate)
+                            && self.is_ancestor_of(backend, candidate_backend)
+                        {
+                            candidates.insert(candidate_backend);
+                        }
+                    }
+                }
+            }
+            current = meta.parent_backend_node_id;
+        }
+
+        match candidates.into_iter().collect::<Vec<_>>().as_slice() {
+            [backend] => Some(*backend),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
+    #[derive(Clone, Copy)]
+    struct WalkContext<'a> {
+        hidden: bool,
+        parent_backend_node_id: Option<i64>,
+        frame_id: Option<&'a str>,
+        tree_scope: usize,
+    }
+
     fn walk(
         node: &Value,
-        inherited_hidden: bool,
-        parent_backend_node_id: Option<i64>,
-        inherited_frame_id: Option<&str>,
+        context: WalkContext<'_>,
+        next_tree_scope: &mut usize,
         order: &mut usize,
         index: &mut DomIndex,
     ) {
         let node_type = node.get("nodeType").and_then(Value::as_i64).unwrap_or(0);
         let attrs = attributes(node);
-        let hidden = inherited_hidden || statically_hidden(&attrs);
+        let hidden = context.hidden || statically_hidden(&attrs);
         let backend_node_id = node.get("backendNodeId").and_then(Value::as_i64);
         let frame_id = if node_type == 9 {
             node.get("frameId").and_then(Value::as_str)
         } else {
-            inherited_frame_id
+            context.frame_id
         };
         if let Some(backend) = backend_node_id {
             let tag = node
@@ -741,7 +832,7 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if node_type == 1 && hidden && !inherited_hidden {
+            if node_type == 1 && hidden && !context.hidden {
                 index.css_hidden_count += 1;
             }
             index.nodes.insert(
@@ -751,8 +842,9 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
                     attrs,
                     order: *order,
                     css_hidden: hidden,
-                    parent_backend_node_id,
+                    parent_backend_node_id: context.parent_backend_node_id,
                     frame_id: frame_id.map(str::to_owned),
+                    tree_scope: context.tree_scope,
                 },
             );
             *order += 1;
@@ -761,9 +853,13 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
             for child in children {
                 walk(
                     child,
-                    hidden,
-                    backend_node_id.or(parent_backend_node_id),
-                    frame_id,
+                    WalkContext {
+                        hidden,
+                        parent_backend_node_id: backend_node_id.or(context.parent_backend_node_id),
+                        frame_id,
+                        tree_scope: context.tree_scope,
+                    },
+                    next_tree_scope,
                     order,
                     index,
                 );
@@ -774,22 +870,34 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
                 if shadow_root.get("shadowRootType").and_then(Value::as_str) == Some("user-agent") {
                     continue;
                 }
+                let shadow_tree_scope = *next_tree_scope;
+                *next_tree_scope += 1;
                 walk(
                     shadow_root,
-                    hidden,
-                    backend_node_id.or(parent_backend_node_id),
-                    frame_id,
+                    WalkContext {
+                        hidden,
+                        parent_backend_node_id: backend_node_id.or(context.parent_backend_node_id),
+                        frame_id,
+                        tree_scope: shadow_tree_scope,
+                    },
+                    next_tree_scope,
                     order,
                     index,
                 );
             }
         }
         if let Some(content_document) = node.get("contentDocument") {
+            let content_tree_scope = *next_tree_scope;
+            *next_tree_scope += 1;
             walk(
                 content_document,
-                hidden,
-                backend_node_id.or(parent_backend_node_id),
-                content_document.get("frameId").and_then(Value::as_str),
+                WalkContext {
+                    hidden,
+                    parent_backend_node_id: backend_node_id.or(context.parent_backend_node_id),
+                    frame_id: content_document.get("frameId").and_then(Value::as_str),
+                    tree_scope: content_tree_scope,
+                },
+                next_tree_scope,
                 order,
                 index,
             );
@@ -798,11 +906,16 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
 
     let mut index = DomIndex::default();
     let mut order = 0;
+    let mut next_tree_scope = 1;
     walk(
         root,
-        false,
-        None,
-        root.get("frameId").and_then(Value::as_str),
+        WalkContext {
+            hidden: false,
+            parent_backend_node_id: None,
+            frame_id: root.get("frameId").and_then(Value::as_str),
+            tree_scope: 0,
+        },
+        &mut next_tree_scope,
         &mut order,
         &mut index,
     );
@@ -996,7 +1109,19 @@ pub(crate) fn compose_accessibility_tree(
         let layout_meta = backend_node_id.and_then(|backend| layout.nodes.get(&backend));
         let states = ax_states(ax);
         let visibility = classify_visibility(dom_meta, layout_meta, viewport);
-        let actions = action_kinds(&role, dom_meta, &states, layout_meta);
+        let mut actions = action_kinds(&role, dom_meta, &states, layout_meta);
+        let upload_backend_node_id = backend_node_id.and_then(|backend| {
+            if actions.contains(&BrowserActionKind::Upload) {
+                Some(backend)
+            } else if semantic_action_disabled(&states, dom_meta) {
+                None
+            } else {
+                dom.unique_associated_file_input(backend)
+            }
+        });
+        if upload_backend_node_id.is_some() && !actions.contains(&BrowserActionKind::Upload) {
+            actions.push(BrowserActionKind::Upload);
+        }
         let name = ax_value_string(ax.get("name")).and_then(clean_semantic_text);
         let value = ax_value_string(ax.get("value")).and_then(clean_semantic_text);
         let document_order = dom_meta.map_or(fallback_order, |meta| meta.order);
@@ -1017,6 +1142,7 @@ pub(crate) fn compose_accessibility_tree(
                 })
                 .unwrap_or_default(),
             backend_node_id,
+            upload_backend_node_id,
             role,
             name,
             value,
@@ -1141,7 +1267,17 @@ fn supplement_dom_actions(
         if meta.attrs.contains_key("disabled") {
             states.insert("disabled".to_owned(), Value::Bool(true));
         }
-        let actions = action_kinds(&role, Some(meta), &states, layout_meta);
+        let mut actions = action_kinds(&role, Some(meta), &states, layout_meta);
+        let upload_backend_node_id = if actions.contains(&BrowserActionKind::Upload) {
+            Some(backend_node_id)
+        } else if semantic_action_disabled(&states, Some(meta)) {
+            None
+        } else {
+            dom.unique_associated_file_input(backend_node_id)
+        };
+        if upload_backend_node_id.is_some() && !actions.contains(&BrowserActionKind::Upload) {
+            actions.push(BrowserActionKind::Upload);
+        }
         if actions.is_empty() {
             continue;
         }
@@ -1156,6 +1292,7 @@ fn supplement_dom_actions(
                 .and_then(|parent| by_backend.get(&parent).cloned()),
             child_ax_ids: Vec::new(),
             backend_node_id: Some(backend_node_id),
+            upload_backend_node_id,
             role,
             name,
             value: meta
@@ -1341,6 +1478,17 @@ fn action_kinds(
         }
     }
     actions
+}
+
+fn semantic_action_disabled(states: &BTreeMap<String, Value>, dom: Option<&DomMeta>) -> bool {
+    states.get("disabled").and_then(Value::as_bool) == Some(true)
+        || dom.is_some_and(|meta| {
+            meta.attrs.contains_key("disabled")
+                || meta
+                    .attrs
+                    .get("aria-disabled")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        })
 }
 
 fn layout_is_scrollable(layout: &LayoutMeta) -> bool {
@@ -1734,11 +1882,142 @@ mod tests {
             css_hidden: false,
             parent_backend_node_id: None,
             frame_id: None,
+            tree_scope: 0,
         };
         assert_eq!(
             action_kinds("textbox", Some(&dom), &BTreeMap::new(), None),
             vec![BrowserActionKind::Upload]
         );
+    }
+
+    #[test]
+    fn visible_label_exposes_upload_only_for_one_explicit_hidden_file_input() {
+        let layout = build_layout_index(&json!({
+            "strings": ["block", "visible", "1", "auto", "pointer"],
+            "documents": [{
+                "nodes": {"backendNodeId": [10]},
+                "layout": {
+                    "nodeIndex": [0],
+                    "bounds": [[10, 10, 120, 36]],
+                    "styles": [[0, 1, 2, 3, 4]],
+                    "paintOrders": [1]
+                }
+            }]
+        }));
+        let viewport = parse_viewport(&json!({
+            "cssVisualViewport": {
+                "pageX": 0.0,
+                "pageY": 0.0,
+                "clientWidth": 800.0,
+                "clientHeight": 600.0
+            }
+        }));
+        let ax = json!({"nodes": [
+            {"nodeId": "root", "ignored": false, "role": {"value": "RootWebArea"},
+             "childIds": ["chooser"]},
+            {"nodeId": "chooser", "parentId": "root", "ignored": false,
+             "backendDOMNodeId": 10, "role": {"value": "button"},
+             "name": {"value": "Choose package"}, "childIds": []}
+        ]});
+        let document_for = |inputs: Value| {
+            let dom = build_dom_index(&json!({
+                "nodeType": 9,
+                "frameId": "F_MAIN",
+                "children": [{
+                    "nodeType": 1,
+                    "nodeName": "LABEL",
+                    "backendNodeId": 10,
+                    "attributes": ["for", "package-file"],
+                }, inputs]
+            }));
+            compose_accessibility_tree(&ax, &dom, &layout, &viewport, frame())
+        };
+
+        let unique = document_for(json!({
+            "nodeType": 1,
+            "nodeName": "INPUT",
+            "backendNodeId": 11,
+            "attributes": ["id", "package-file", "type", "file", "style", "display:none"]
+        }));
+        let chooser = unique
+            .nodes
+            .iter()
+            .find(|node| node.backend_node_id == Some(10))
+            .expect("visible chooser");
+        assert!(chooser.actions.contains(&BrowserActionKind::Upload));
+
+        let ambiguous = document_for(json!({
+            "nodeType": 1,
+            "nodeName": "DIV",
+            "backendNodeId": 12,
+            "children": [
+                {"nodeType": 1, "nodeName": "INPUT", "backendNodeId": 13,
+                 "attributes": ["id", "package-file", "type", "file", "style", "display:none"]},
+                {"nodeType": 1, "nodeName": "INPUT", "backendNodeId": 14,
+                 "attributes": ["id", "package-file", "type", "file", "style", "display:none"]}
+            ]
+        }));
+        let chooser = ambiguous
+            .nodes
+            .iter()
+            .find(|node| node.backend_node_id == Some(10))
+            .expect("visible chooser");
+        assert!(!chooser.actions.contains(&BrowserActionKind::Upload));
+
+        let duplicate_id = document_for(json!({
+            "nodeType": 1,
+            "nodeName": "DIV",
+            "backendNodeId": 19,
+            "children": [
+                {"nodeType": 1, "nodeName": "INPUT", "backendNodeId": 20,
+                 "attributes": ["id", "package-file", "type", "file", "style", "display:none"]},
+                {"nodeType": 1, "nodeName": "DIV", "backendNodeId": 21,
+                 "attributes": ["id", "package-file"]}
+            ]
+        }));
+        let chooser = duplicate_id
+            .nodes
+            .iter()
+            .find(|node| node.backend_node_id == Some(10))
+            .expect("visible chooser");
+        assert!(!chooser.actions.contains(&BrowserActionKind::Upload));
+
+        let unrelated = document_for(json!({
+            "nodeType": 1,
+            "nodeName": "INPUT",
+            "backendNodeId": 15,
+            "attributes": ["id", "other-file", "type", "file", "style", "display:none"]
+        }));
+        let chooser = unrelated
+            .nodes
+            .iter()
+            .find(|node| node.backend_node_id == Some(10))
+            .expect("visible chooser");
+        assert!(!chooser.actions.contains(&BrowserActionKind::Upload));
+
+        let cross_shadow = document_for(json!({
+            "nodeType": 1,
+            "nodeName": "DIV",
+            "backendNodeId": 16,
+            "shadowRoots": [{
+                "nodeType": 11,
+                "nodeName": "#document-fragment",
+                "shadowRootType": "open",
+                "backendNodeId": 17,
+                "children": [{
+                    "nodeType": 1,
+                    "nodeName": "INPUT",
+                    "backendNodeId": 18,
+                    "attributes": ["id", "package-file", "type", "file", "style", "display:none"]
+                }]
+            }]
+        }));
+        let chooser = cross_shadow
+            .nodes
+            .iter()
+            .find(|node| node.backend_node_id == Some(10))
+            .expect("visible chooser");
+        assert!(!chooser.actions.contains(&BrowserActionKind::Upload));
     }
     use crate::browser::store::FrameRef;
 
@@ -1773,6 +2052,7 @@ mod tests {
             parent_ax_id: parent_ax_id.map(str::to_owned),
             child_ax_ids: child_ax_ids.iter().map(|id| (*id).to_owned()).collect(),
             backend_node_id,
+            upload_backend_node_id: None,
             role: role.to_owned(),
             name: name.map(str::to_owned),
             value: None,
