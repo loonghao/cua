@@ -870,6 +870,7 @@ Read-only browser inspection. Mode 1 (bind): pass pid + window_id of a native br
 - `include_screenshot` (boolean, optional): Capture the exact tab viewport as PNG through CDP without selecting the tab or foregrounding its native window. The request refuses if capture cannot be completed. default: `false`
 - `pid` (integer, optional): Native browser process id (bind mode).
 - `query` (string, optional): Read-only semantic match over role, accessible name, and visible text.
+- `scope_ancestor_role` (string, optional): Resolve scope_ref to its nearest strict same-frame ancestor with this exact accessibility role, then apply query inside that subtree. Requires scope_ref and query.
 - `scope_ref` (string, optional): Current semantic/content ref whose subtree should be observed.
 - `session` (string, optional): For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session.
 - `snapshot_format` (string, optional): Versioned snapshot contract. dom_refs_v1 remains the compatibility default.
