@@ -563,9 +563,25 @@ mod tests {
     }
 
     #[test]
-    fn matcher_refuses_multiple_pane_rooted_native_prompts() {
+    fn matcher_deduplicates_repeated_native_prompt_surfaces_by_exact_action() {
         let mut nodes = pane_rooted_prompt("first opaque title", ["A", "B", "C"]);
-        nodes.extend(pane_rooted_prompt("second opaque title", ["D", "E", "F"]));
+        nodes.extend(pane_rooted_prompt("first opaque title", ["A", "B", "C"]));
+
+        assert_eq!(
+            exact_allow_button_with(&nodes, properties).unwrap(),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn matcher_refuses_multiple_distinct_pane_rooted_native_prompts() {
+        let mut nodes = pane_rooted_prompt("first opaque title", ["A", "B", "C"]);
+        let mut second = pane_rooted_prompt("second opaque title", ["D", "E", "F"]);
+        for node in second.iter_mut().filter(|node| node.element_ptr != 0) {
+            node.element_ptr += 100;
+            node.element_index = Some(node.element_ptr);
+        }
+        nodes.extend(second);
 
         assert_eq!(
             exact_allow_button_with(&nodes, properties)
