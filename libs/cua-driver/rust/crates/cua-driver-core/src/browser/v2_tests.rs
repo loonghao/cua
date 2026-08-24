@@ -29,7 +29,7 @@ use super::pointer::BrowserPointerTool;
 use super::refusal::BrowserRefusal;
 use super::tools::{
     browser_protected_resource_scope, BrowserClickTool, BrowserNavigateTool, BrowserPrepareTool,
-    BrowserTypeTool, GetBrowserStateTool,
+    BrowserSetInputFilesTool, BrowserTypeTool, GetBrowserStateTool,
 };
 use super::types::{
     BrowserClassification, BrowserEngineFamily, BrowserProcessRole, BrowserProduct,
@@ -56,9 +56,12 @@ struct FixtureState {
     fail_key_down_after: Option<usize>,
     completed_key_pairs: usize,
     semantic_large_page: bool,
+    semantic_scoped_rows: bool,
     semantic_full_dom_fails: bool,
     semantic_full_dom_times_out: bool,
     semantic_truncated_dom: bool,
+    hidden_file_input: bool,
+    ambiguous_hidden_file_input: bool,
     screenshot_data: String,
     viewport_css_width: f64,
     viewport_css_height: f64,
@@ -82,9 +85,12 @@ impl Default for FixtureState {
             fail_key_down_after: None,
             completed_key_pairs: 0,
             semantic_large_page: false,
+            semantic_scoped_rows: false,
             semantic_full_dom_fails: false,
             semantic_full_dom_times_out: false,
             semantic_truncated_dom: false,
+            hidden_file_input: false,
+            ambiguous_hidden_file_input: false,
             screenshot_data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZJrAAAAAASUVORK5CYII=".into(),
             viewport_css_width: 800.0,
             viewport_css_height: 600.0,
@@ -190,6 +196,58 @@ fn main_document() -> Value {
     })
 }
 
+fn hidden_file_input_document(ambiguous: bool) -> Value {
+    let mut children = vec![
+        json!({
+            "nodeType": 1,
+            "nodeName": "LABEL",
+            "backendNodeId": 50,
+            "attributes": ["for", "package-file", "aria-label", "Choose package"],
+        }),
+        json!({
+            "nodeType": 1,
+            "nodeName": "INPUT",
+            "backendNodeId": 51,
+            "attributes": ["id", "package-file", "type", "file", "style", "display:none"],
+        }),
+    ];
+    if ambiguous {
+        children.push(json!({
+            "nodeType": 1,
+            "nodeName": "INPUT",
+            "backendNodeId": 52,
+            "attributes": ["id", "package-file", "type", "file", "style", "display:none"],
+        }));
+    }
+    json!({
+        "root": {
+            "nodeType": 9,
+            "nodeName": "#document",
+            "documentURL": "https://fixture.test/store",
+            "frameId": "F_MAIN",
+            "children": [{
+                "nodeType": 1,
+                "nodeName": "HTML",
+                "backendNodeId": 1,
+                "children": children
+            }]
+        }
+    })
+}
+
+fn hidden_file_input_ax_tree(frame_id: &str) -> Value {
+    if frame_id != "F_MAIN" {
+        return json!({"nodes": []});
+    }
+    json!({"nodes": [
+        {"nodeId": "root", "ignored": false, "role": {"value": "RootWebArea"},
+         "childIds": ["chooser"]},
+        {"nodeId": "chooser", "parentId": "root", "ignored": false,
+         "backendDOMNodeId": 50, "role": {"value": "button"},
+         "name": {"value": "Choose package"}, "childIds": []}
+    ]})
+}
+
 /// Large application document used to prove that hidden retained controls do
 /// not consume the semantic snapshot budget ahead of the active view.
 fn large_semantic_document() -> Value {
@@ -261,6 +319,68 @@ fn large_semantic_document() -> Value {
                 "nodeName": "HTML",
                 "backendNodeId": 999,
                 "children": children,
+            }]
+        }
+    })
+}
+
+/// Two release rows with repeated action names. The first row deliberately
+/// exceeds the semantic page budget so ancestor-scoped continuation can be
+/// proven without ever admitting the matching action from the second row.
+fn scoped_rows_semantic_document(frame_id: &str) -> Value {
+    let mut first_row_children = vec![json!({
+        "nodeType": 1,
+        "nodeName": "A",
+        "backendNodeId": 4_100,
+        "attributes": ["aria-label", "0.19.89", "href", "/release/0.19.89"],
+    })];
+    for id in 0..305_i64 {
+        first_row_children.push(json!({
+            "nodeType": 1,
+            "nodeName": "BUTTON",
+            "backendNodeId": 4_200 + id,
+            "attributes": ["aria-label", "View release options"],
+        }));
+    }
+    json!({
+        "root": {
+            "nodeType": 9,
+            "nodeName": "#document",
+            "documentURL": "https://fixture.test/releases",
+            "frameId": frame_id,
+            "children": [{
+                "nodeType": 1,
+                "nodeName": "HTML",
+                "backendNodeId": 3_999,
+                "children": [
+                    {
+                        "nodeType": 1,
+                        "nodeName": "DIV",
+                        "backendNodeId": 4_000,
+                        "attributes": ["role", "row", "aria-label", "Release 0.19.89"],
+                        "children": first_row_children,
+                    },
+                    {
+                        "nodeType": 1,
+                        "nodeName": "DIV",
+                        "backendNodeId": 5_000,
+                        "attributes": ["role", "row", "aria-label", "Release 0.19.88"],
+                        "children": [
+                            {
+                                "nodeType": 1,
+                                "nodeName": "A",
+                                "backendNodeId": 5_100,
+                                "attributes": ["aria-label", "0.19.88", "href", "/release/0.19.88"],
+                            },
+                            {
+                                "nodeType": 1,
+                                "nodeName": "BUTTON",
+                                "backendNodeId": 5_200,
+                                "attributes": ["aria-label", "View release options"],
+                            }
+                        ]
+                    }
+                ]
             }]
         }
     })
@@ -367,6 +487,107 @@ fn large_semantic_ax_tree(frame_id: &str) -> Value {
         }));
     }
     json!({"nodes": nodes})
+}
+
+fn scoped_rows_semantic_ax_tree(frame_id: &str) -> Value {
+    if !matches!(frame_id, "F_MAIN" | "F_OOPIF") {
+        return json!({"nodes": [{
+            "nodeId": format!("root-{frame_id}"),
+            "ignored": false,
+            "role": {"value": "RootWebArea"},
+            "childIds": []
+        }]});
+    }
+    let mut first_row_children = vec!["version-89".to_owned()];
+    first_row_children.extend((0..305).map(|id| format!("options-89-{id}")));
+    let mut nodes = vec![
+        json!({
+            "nodeId": "root-main",
+            "ignored": false,
+            "role": {"value": "RootWebArea"},
+            "name": {"value": "Releases"},
+            "childIds": ["row-89", "row-88"]
+        }),
+        json!({
+            "nodeId": "row-89",
+            "parentId": "root-main",
+            "ignored": false,
+            "backendDOMNodeId": 4_000,
+            "role": {"value": "row"},
+            "name": {"value": "Release 0.19.89"},
+            "childIds": first_row_children
+        }),
+        json!({
+            "nodeId": "version-89",
+            "parentId": "row-89",
+            "ignored": false,
+            "backendDOMNodeId": 4_100,
+            "role": {"value": "link"},
+            "name": {"value": "0.19.89"},
+            "childIds": []
+        }),
+    ];
+    for id in 0..305_i64 {
+        nodes.push(json!({
+            "nodeId": format!("options-89-{id}"),
+            "parentId": "row-89",
+            "ignored": false,
+            "backendDOMNodeId": 4_200 + id,
+            "role": {"value": "button"},
+            "name": {"value": "View release options"},
+            "childIds": []
+        }));
+    }
+    nodes.extend([
+        json!({
+            "nodeId": "row-88",
+            "parentId": "root-main",
+            "ignored": false,
+            "backendDOMNodeId": 5_000,
+            "role": {"value": "row"},
+            "name": {"value": "Release 0.19.88"},
+            "childIds": ["version-88", "options-88"]
+        }),
+        json!({
+            "nodeId": "version-88",
+            "parentId": "row-88",
+            "ignored": false,
+            "backendDOMNodeId": 5_100,
+            "role": {"value": "link"},
+            "name": {"value": "0.19.88"},
+            "childIds": []
+        }),
+        json!({
+            "nodeId": "options-88",
+            "parentId": "row-88",
+            "ignored": false,
+            "backendDOMNodeId": 5_200,
+            "role": {"value": "button"},
+            "name": {"value": "View release options"},
+            "childIds": []
+        }),
+    ]);
+    json!({"nodes": nodes})
+}
+
+fn scoped_rows_layout_snapshot() -> Value {
+    let mut backends = vec![3_999, 4_000, 4_100];
+    let mut bounds = vec![
+        [0.0, 0.0, 800.0, 13_000.0],
+        [0.0, 0.0, 800.0, 12_500.0],
+        [10.0, 10.0, 100.0, 30.0],
+    ];
+    for id in 0..305_i64 {
+        backends.push(4_200 + id);
+        bounds.push([120.0, 10.0 + id as f64 * 40.0, 180.0, 30.0]);
+    }
+    backends.extend([5_000, 5_100, 5_200]);
+    bounds.extend([
+        [0.0, 13_000.0, 800.0, 100.0],
+        [10.0, 13_010.0, 100.0, 30.0],
+        [120.0, 13_010.0, 180.0, 30.0],
+    ]);
+    semantic_layout_snapshot(&backends, &bounds)
 }
 
 fn semantic_layout_snapshot(backends: &[i64], bounds: &[[f64; 4]]) -> Value {
@@ -476,7 +697,11 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 } else if st.semantic_truncated_dom && depth == 8 {
                     MockReply::ok(truncated_semantic_document())
                 } else {
-                    MockReply::ok(if st.semantic_large_page {
+                    MockReply::ok(if st.hidden_file_input {
+                        hidden_file_input_document(st.ambiguous_hidden_file_input)
+                    } else if st.semantic_scoped_rows {
+                        scoped_rows_semantic_document("F_MAIN")
+                    } else if st.semantic_large_page {
                         large_semantic_document()
                     } else {
                         main_document()
@@ -488,26 +713,57 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     "node": large_semantic_document()["root"]["children"][0].clone()
                 }))
             }
-            "DOM.getDocument" if is_oopif => MockReply::ok(oopif_document()),
+            "DOM.describeNode" if is_tab && call.params["backendNodeId"] == 51 => {
+                MockReply::ok(json!({
+                    "node": {
+                        "nodeType": 1,
+                        "nodeName": "INPUT",
+                        "backendNodeId": 51,
+                        "attributes": ["id", "package-file", "type", "file", "style", "display:none"]
+                    }
+                }))
+            }
+            "DOM.getDocument" if is_oopif => MockReply::ok(if st.semantic_scoped_rows {
+                scoped_rows_semantic_document("F_OOPIF")
+            } else {
+                oopif_document()
+            }),
             "Accessibility.getFullAXTree" if is_tab => {
                 let frame_id = call.params["frameId"].as_str().unwrap_or("F_MAIN");
-                if st.semantic_large_page {
+                if st.hidden_file_input {
+                    MockReply::ok(hidden_file_input_ax_tree(frame_id))
+                } else if st.semantic_scoped_rows {
+                    MockReply::ok(scoped_rows_semantic_ax_tree(frame_id))
+                } else if st.semantic_large_page {
                     MockReply::ok(large_semantic_ax_tree(frame_id))
                 } else {
                     MockReply::ok(json!({"nodes": []}))
                 }
             }
-            "Accessibility.getFullAXTree" if is_oopif => MockReply::ok(json!({"nodes": [
-                {"nodeId": "oopif-root", "ignored": false,
-                 "role": {"value": "RootWebArea"}, "childIds": ["oopif-input"]},
-                {"nodeId": "oopif-input", "parentId": "oopif-root", "ignored": false,
-                 "backendDOMNodeId": 100, "role": {"value": "textbox"},
-                 "name": {"value": "Embedded input"},
-                 "properties": [{"name": "editable", "value": {"value": "plaintext"}}],
-                 "childIds": []}
-            ]})),
+            "Accessibility.getFullAXTree" if is_oopif => {
+                if st.semantic_scoped_rows {
+                    MockReply::ok(scoped_rows_semantic_ax_tree("F_OOPIF"))
+                } else {
+                    MockReply::ok(json!({"nodes": [
+                        {"nodeId": "oopif-root", "ignored": false,
+                         "role": {"value": "RootWebArea"}, "childIds": ["oopif-input"]},
+                        {"nodeId": "oopif-input", "parentId": "oopif-root", "ignored": false,
+                         "backendDOMNodeId": 100, "role": {"value": "textbox"},
+                         "name": {"value": "Embedded input"},
+                         "properties": [{"name": "editable", "value": {"value": "plaintext"}}],
+                         "childIds": []}
+                    ]}))
+                }
+            }
             "DOMSnapshot.captureSnapshot" if is_tab => {
-                if st.semantic_large_page {
+                if st.hidden_file_input {
+                    MockReply::ok(semantic_layout_snapshot(
+                        &[50],
+                        &[[10.0, 10.0, 120.0, 36.0]],
+                    ))
+                } else if st.semantic_scoped_rows {
+                    MockReply::ok(scoped_rows_layout_snapshot())
+                } else if st.semantic_large_page {
                     let mut backends = vec![999, 2000, 2003, 2010, 2011];
                     let mut bounds = vec![
                         [0.0, 0.0, 800.0, 600.0],
@@ -525,10 +781,16 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     MockReply::ok(semantic_layout_snapshot(&[], &[]))
                 }
             }
-            "DOMSnapshot.captureSnapshot" if is_oopif => MockReply::ok(semantic_layout_snapshot(
-                &[90, 100],
-                &[[0.0, 0.0, 300.0, 100.0], [10.0, 10.0, 120.0, 30.0]],
-            )),
+            "DOMSnapshot.captureSnapshot" if is_oopif => {
+                if st.semantic_scoped_rows {
+                    MockReply::ok(scoped_rows_layout_snapshot())
+                } else {
+                    MockReply::ok(semantic_layout_snapshot(
+                        &[90, 100],
+                        &[[0.0, 0.0, 300.0, 100.0], [10.0, 10.0, 120.0, 30.0]],
+                    ))
+                }
+            }
             "Page.getLayoutMetrics" => MockReply::ok(json!({
                 "cssVisualViewport": {
                     "pageX": 0.0,
@@ -647,7 +909,8 @@ fn fixture_handler(state: SharedState) -> MockHandler {
             "DOM.focus"
             | "Emulation.setFocusEmulationEnabled"
             | "Input.dispatchMouseEvent"
-            | "Input.insertText" => MockReply::ok(json!({})),
+            | "Input.insertText"
+            | "DOM.setFileInputFiles" => MockReply::ok(json!({})),
             "DOM.resolveNode" => MockReply::ok(json!({
                 "object": { "objectId": format!("obj-{}", call.params["backendNodeId"]) }
             })),
@@ -1688,6 +1951,257 @@ async fn main_frame_navigation_invalidates_semantic_continuations() {
 }
 
 #[tokio::test]
+async fn semantic_ancestor_scope_is_row_precise_and_continuation_preserves_anchor() {
+    let f = fixture_with(|state| {
+        state.semantic_scoped_rows = true;
+        state.oopif_present = false;
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let seeded = semantic_snapshot_with(&f, &target, &tab, json!({"query": "0.19.89"})).await;
+    let source_ref = seeded["refs"]
+        .as_array()
+        .and_then(|refs| refs.iter().find(|entry| entry["role"] == "link"))
+        .and_then(|entry| entry["ref"].as_str())
+        .expect("version link ref")
+        .to_owned();
+
+    let unavailable = semantic_snapshot_with(
+        &f,
+        &target,
+        &tab,
+        json!({
+            "scope_ref": source_ref,
+            "scope_ancestor_role": "treegrid",
+            "query": "View release options"
+        }),
+    )
+    .await;
+    assert_eq!(unavailable["status"], "refused", "{unavailable}");
+    assert_eq!(unavailable["refusal"]["code"], "browser_scope_unavailable");
+    assert_eq!(
+        unavailable["refusal"]["detail"]["reason"],
+        "ancestor_missing"
+    );
+
+    let first = semantic_snapshot_with(
+        &f,
+        &target,
+        &tab,
+        json!({
+            "scope_ref": source_ref,
+            "scope_ancestor_role": "RoW",
+            "query": "View release options"
+        }),
+    )
+    .await;
+    assert_eq!(first["status"], "ok", "{first}");
+    assert_eq!(first["snapshot"]["scope"], "ancestor_subtree", "{first}");
+    assert_eq!(first["snapshot"]["complete"], false, "{first}");
+    assert_eq!(first["snapshot"]["selected_nodes"], 300, "{first}");
+    assert_eq!(first["snapshot"]["total_nodes"], 305, "{first}");
+    assert_eq!(
+        first["snapshot"]["scope_anchor"]["requested_ref"],
+        source_ref
+    );
+    assert_eq!(first["snapshot"]["scope_anchor"]["role"], "row");
+    assert_eq!(first["snapshot"]["scope_anchor"]["name"], "Release 0.19.89");
+    assert_eq!(first["snapshot"]["scope_anchor"]["frame"], "main");
+    assert_eq!(first["snapshot"]["scope_anchor"]["distance"], 1);
+    assert!(first["refs"].as_array().is_some_and(|refs| {
+        refs.len() == 300
+            && refs
+                .iter()
+                .all(|entry| entry["name"] == "View release options" && entry["frame"] == "main")
+    }));
+
+    let token = first["snapshot"]["continuation"]
+        .as_str()
+        .expect("scoped continuation")
+        .to_owned();
+    let incompatible = semantic_snapshot_with(
+        &f,
+        &target,
+        &tab,
+        json!({
+            "continuation": token,
+            "scope_ref": source_ref,
+            "scope_ancestor_role": "row",
+            "query": "View release options"
+        }),
+    )
+    .await;
+    assert_eq!(incompatible["status"], "refused", "{incompatible}");
+    assert_eq!(incompatible["refusal"]["code"], "browser_ref_stale");
+
+    let continued = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
+    assert_eq!(continued["status"], "ok", "{continued}");
+    assert_eq!(continued["snapshot"]["scope"], "continuation");
+    assert_eq!(continued["snapshot"]["complete"], true, "{continued}");
+    assert_eq!(continued["snapshot"]["selected_nodes"], 5, "{continued}");
+    assert_eq!(continued["snapshot"]["total_nodes"], 305, "{continued}");
+    assert_eq!(
+        continued["snapshot"]["scope_anchor"],
+        first["snapshot"]["scope_anchor"]
+    );
+    assert!(continued["refs"].as_array().is_some_and(|refs| {
+        refs.len() == 5
+            && refs
+                .iter()
+                .all(|entry| entry["name"] == "View release options")
+    }));
+}
+
+#[tokio::test]
+async fn semantic_ancestor_scope_schema_and_combinations_fail_closed() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let tool = GetBrowserStateTool::new(f.engine.clone());
+    assert_eq!(
+        tool.def().input_schema["properties"]["scope_ancestor_role"]["maxLength"],
+        128
+    );
+
+    let missing_ref = tool
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+            "snapshot_format": "semantic_v2",
+            "scope_ancestor_role": "row",
+            "query": "Options"
+        }))
+        .await;
+    assert_eq!(missing_ref.is_error, Some(true));
+    assert!(missing_ref.content.iter().any(|content| matches!(
+        content,
+        Content::Text { text, .. } if text.contains("requires both scope_ref and query")
+    )));
+
+    let legacy = tool
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+            "snapshot_format": "dom_refs_v1",
+            "scope_ref": "p1:0",
+            "scope_ancestor_role": "row",
+            "query": "Options"
+        }))
+        .await;
+    assert_eq!(legacy.is_error, Some(true));
+    assert!(legacy.content.iter().any(|content| matches!(
+        content,
+        Content::Text { text, .. } if text.contains("require snapshot_format=\"semantic_v2\"")
+    )));
+
+    for invalid in [Value::Null, json!(42)] {
+        let result = tool
+            .invoke(json!({
+                "target_id": target,
+                "tab_id": tab,
+                "session": SESSION,
+                "snapshot_format": "dom_refs_v1",
+                "scope_ancestor_role": invalid
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    let bind_mode = tool
+        .invoke(json!({
+            "pid": 1,
+            "window_id": 7,
+            "session": SESSION,
+            "scope_ancestor_role": "row"
+        }))
+        .await;
+    assert_eq!(bind_mode.is_error, Some(true));
+    assert!(bind_mode.content.iter().any(|content| matches!(
+        content,
+        Content::Text { text, .. } if text.contains("only in snapshot mode")
+    )));
+
+    let whitespace = tool
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+            "snapshot_format": "semantic_v2",
+            "scope_ref": "p1:0",
+            "scope_ancestor_role": " row",
+            "query": "Options"
+        }))
+        .await;
+    assert_eq!(whitespace.is_error, Some(true));
+}
+
+#[tokio::test]
+async fn semantic_ancestor_continuation_revalidates_the_oopif_loader() {
+    let f = fixture_with(|state| state.semantic_scoped_rows = true).await;
+    let (target, tab) = bind(&f).await;
+    let seeded = semantic_snapshot_with(&f, &target, &tab, json!({"query": "0.19.89"})).await;
+    let source_ref = seeded["refs"]
+        .as_array()
+        .and_then(|refs| {
+            refs.iter()
+                .find(|entry| entry["role"] == "link" && entry["frame"] == "oopif")
+        })
+        .and_then(|entry| entry["ref"].as_str())
+        .expect("OOPIF version link ref")
+        .to_owned();
+    let first = semantic_snapshot_with(
+        &f,
+        &target,
+        &tab,
+        json!({
+            "scope_ref": source_ref,
+            "scope_ancestor_role": "row",
+            "query": "View release options"
+        }),
+    )
+    .await;
+    assert_eq!(first["status"], "ok", "seeded={seeded}; first={first}");
+    let token = first["snapshot"]["continuation"]
+        .as_str()
+        .unwrap_or_else(|| panic!("OOPIF scoped continuation: {first}"))
+        .to_owned();
+    f.state.lock().unwrap().oopif_loader = "L_OOPIF_2".into();
+
+    let stale = semantic_snapshot_with(&f, &target, &tab, json!({"continuation": token})).await;
+    assert_eq!(stale["status"], "refused", "{stale}");
+    assert_eq!(stale["refusal"]["code"], "browser_ref_stale");
+    assert_eq!(stale["refusal"]["detail"]["reason"], "scope_frame_changed");
+}
+
+#[tokio::test]
+async fn legacy_direct_scope_missing_from_fresh_semantics_stays_empty_and_ok() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let seeded = semantic_snapshot_with(&f, &target, &tab, json!({"query": "main-btn"})).await;
+    let source_ref = seeded["refs"]
+        .as_array()
+        .and_then(|refs| refs.first())
+        .and_then(|entry| entry["ref"].as_str())
+        .expect("main action ref")
+        .to_owned();
+    f.state.lock().unwrap().semantic_large_page = true;
+
+    let scoped = semantic_snapshot_with(
+        &f,
+        &target,
+        &tab,
+        json!({"scope_ref": source_ref, "query": "main-btn"}),
+    )
+    .await;
+    assert_eq!(scoped["status"], "ok", "{scoped}");
+    assert_eq!(scoped["snapshot"]["scope"], "subtree");
+    assert_eq!(scoped["snapshot"]["total_nodes"], 0);
+    assert!(scoped["snapshot"]["scope_anchor"].is_null());
+    assert_eq!(scoped["refs"], json!([]));
+}
+
+#[tokio::test]
 async fn semantic_query_and_content_scope_are_read_only_and_precise() {
     let f = fixture_with(|st| st.semantic_large_page = true).await;
     let (target, tab) = bind(&f).await;
@@ -1856,6 +2370,84 @@ async fn semantic_refs_enforce_declared_action_kinds_before_delivery() {
     );
     assert!(recorded_calls(&f, "Input.insertText").is_empty());
     assert!(recorded_calls(&f, "Runtime.callFunctionOn").is_empty());
+}
+
+#[tokio::test]
+async fn semantic_upload_uses_only_one_explicitly_associated_hidden_file_input() {
+    let f = fixture_with(|state| state.hidden_file_input = true).await;
+    let (target, tab) = bind(&f).await;
+    let snap = semantic_snapshot(&f, &target, &tab).await;
+    let chooser = snap["refs"]
+        .as_array()
+        .and_then(|refs| refs.iter().find(|entry| entry["name"] == "Choose package"))
+        .expect("visible chooser ref");
+    assert!(chooser["actions"]
+        .as_array()
+        .is_some_and(|actions| actions.iter().any(|action| action == "upload")));
+    let chooser_ref = chooser["ref"].as_str().expect("chooser ref");
+    let upload = tempfile::NamedTempFile::new().expect("upload fixture");
+
+    let result = BrowserSetInputFilesTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+            "ref": chooser_ref,
+            "files": [upload.path().to_string_lossy()]
+        }))
+        .await;
+    assert_eq!(
+        structured(&result)["status"],
+        "ok",
+        "{}",
+        structured(&result)
+    );
+    assert_eq!(structured(&result)["ref"], chooser_ref);
+    assert_eq!(structured(&result)["file_count"], 1);
+    assert!(
+        !structured(&result)
+            .to_string()
+            .contains(upload.path().to_string_lossy().as_ref()),
+        "public result must not disclose the local upload path"
+    );
+    let assignments = recorded_calls(&f, "DOM.setFileInputFiles");
+    assert_eq!(assignments.len(), 1, "{assignments:?}");
+    assert_eq!(assignments[0].1["backendNodeId"], 51);
+    assert_eq!(assignments[0].1["files"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn semantic_upload_rejects_ambiguous_hidden_file_input_associations() {
+    let f = fixture_with(|state| {
+        state.hidden_file_input = true;
+        state.ambiguous_hidden_file_input = true;
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let snap = semantic_snapshot(&f, &target, &tab).await;
+    let chooser = snap["refs"]
+        .as_array()
+        .and_then(|refs| refs.iter().find(|entry| entry["name"] == "Choose package"))
+        .expect("visible chooser ref");
+    assert!(chooser["actions"]
+        .as_array()
+        .is_some_and(|actions| actions.iter().all(|action| action != "upload")));
+    let upload = tempfile::NamedTempFile::new().expect("upload fixture");
+    let result = BrowserSetInputFilesTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "session": SESSION,
+            "ref": chooser["ref"],
+            "files": [upload.path().to_string_lossy()]
+        }))
+        .await;
+    assert_eq!(
+        structured(&result)["refusal"]["code"],
+        "browser_action_unavailable"
+    );
+    assert!(recorded_calls(&f, "DOM.describeNode").is_empty());
+    assert!(recorded_calls(&f, "DOM.setFileInputFiles").is_empty());
 }
 
 #[tokio::test]
