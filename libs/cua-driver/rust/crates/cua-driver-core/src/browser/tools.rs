@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::time::{sleep, Duration};
 
 use crate::protocol::{Content, ToolResult};
 use crate::tool::{ProtectedResourceOwnership, Tool, ToolDef, ToolRegistry};
@@ -37,6 +38,41 @@ pub fn register_browser_tools(engine: &Arc<BrowserEngine>, registry: &mut ToolRe
     registry.register(Box::new(BrowserSetInputFilesTool::new(engine.clone())));
     registry.register(Box::new(BrowserDownloadTool::new(engine.clone())));
     registry.register(Box::new(BrowserPointerTool::new(engine.clone())));
+}
+
+const FOREGROUND_READBACK_ATTEMPTS: usize = 50;
+const FOREGROUND_READBACK_INTERVAL: Duration = Duration::from_millis(100);
+
+async fn read_activated_tab(conn: &CdpConnection, cdp_session: &str) -> Result<Value, String> {
+    let expression = r#"JSON.stringify({current_url: location.href, title: document.title, heading: document.querySelector('h1,h2,[role=heading]')?.textContent?.trim() ?? '', visibility_state: document.visibilityState, ready_state: document.readyState})"#;
+    for attempt in 0..FOREGROUND_READBACK_ATTEMPTS {
+        let value = conn
+            .call(
+                Some(cdp_session),
+                "Runtime.evaluate",
+                json!({"expression": expression, "returnByValue": true}),
+            )
+            .await
+            .map_err(|error| format!("foreground browser readback failed: {error}"))?;
+        let encoded = value["result"]["value"].as_str().unwrap_or_default();
+        let readback: Value = serde_json::from_str(encoded)
+            .map_err(|error| format!("foreground browser readback was malformed: {error}"))?;
+        let settled = matches!(
+            readback["ready_state"].as_str(),
+            Some("interactive" | "complete")
+        );
+        let exact_fields = readback["visibility_state"] == "visible"
+            && readback["current_url"].as_str().is_some()
+            && readback["title"].as_str().is_some()
+            && readback["heading"].as_str().is_some();
+        if settled && exact_fields {
+            return Ok(readback);
+        }
+        if attempt + 1 < FOREGROUND_READBACK_ATTEMPTS {
+            sleep(FOREGROUND_READBACK_INTERVAL).await;
+        }
+    }
+    Err("foreground browser activation did not produce settled visible readback".to_owned())
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
@@ -852,6 +888,12 @@ impl BrowserNavigateTool {
                     "target_id": schema_target_id(),
                     "tab_id": schema_tab_id(),
                     "url": { "type": "string", "description": "Destination URL (http:, https:, or about:)." },
+                    "delivery_mode": {
+                        "type": "string",
+                        "enum": ["background", "foreground"],
+                        "default": "background",
+                        "description": "Background preserves the selected tab. Foreground explicitly selects this exact tab and returns live page readback."
+                    },
                     "session": schema_session(),
                 },
                 "required": ["target_id", "tab_id", "url"],
@@ -909,6 +951,15 @@ impl Tool for BrowserNavigateTool {
             Ok(s) => s,
             Err(e) => return e,
         };
+        let delivery_mode = match args.opt_str("delivery_mode").as_deref() {
+            None | Some("background") => "background",
+            Some("foreground") => "foreground",
+            Some(other) => {
+                return ToolResult::error(format!(
+                    "browser_navigate delivery_mode must be background or foreground, got: {other}"
+                ))
+            }
+        };
         let lower = url.to_ascii_lowercase();
         if !(lower.starts_with("http://")
             || lower.starts_with("https://")
@@ -953,13 +1004,44 @@ impl Tool for BrowserNavigateTool {
                 self.engine
                     .store
                     .invalidate_tab_snapshots(&session, &target_id, &tab_id);
-                ToolResult::text(format!("navigated {tab_id} to {url}")).with_structured(json!({
+                let readback = if delivery_mode == "foreground" {
+                    if let Err(error) = validated
+                        .conn
+                        .call(
+                            None,
+                            "Target.activateTarget",
+                            json!({"targetId": validated.tab.cdp_target_id}),
+                        )
+                        .await
+                    {
+                        return ToolResult::error(format!("Target.activateTarget failed: {error}"));
+                    }
+                    let readback =
+                        match read_activated_tab(&validated.conn, &validated.cdp_session).await {
+                            Ok(value) => value,
+                            Err(error) => return ToolResult::error(error),
+                        };
+                    Some(readback)
+                } else {
+                    None
+                };
+                let mut structured = json!({
                     "status": "ok",
                     "target_id": target_id,
                     "tab_id": tab_id,
                     "url": url,
+                    "delivery_mode": delivery_mode,
+                    "activated": delivery_mode == "foreground",
                     "refs_invalidated": true,
-                }))
+                });
+                if let Some(readback) = readback {
+                    structured["current_url"] = readback["current_url"].clone();
+                    structured["title"] = readback["title"].clone();
+                    structured["heading"] = readback["heading"].clone();
+                    structured["visibility_state"] = readback["visibility_state"].clone();
+                    structured["ready_state"] = readback["ready_state"].clone();
+                }
+                ToolResult::text(format!("navigated {tab_id} to {url}")).with_structured(structured)
             }
             Err(e) => ToolResult::error(format!("Page.navigate failed: {e}")),
         }

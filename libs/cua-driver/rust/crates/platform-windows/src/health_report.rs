@@ -189,7 +189,7 @@ fn probe_d3d11_device() -> Result<(), String> {
 fn ver_string() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        let output = std::process::Command::new("cmd")
+        let output = crate::subprocess::std_hidden("cmd")
             .args(["/c", "ver"])
             .output()
             .ok()?;
