@@ -8408,7 +8408,7 @@ if ($null -ne $rid) {{ Write-Output ([int]$rid) }}
 "#,
         pid = pid
     );
-    let out = std::process::Command::new("powershell.exe")
+    let out = crate::subprocess::std_hidden("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
