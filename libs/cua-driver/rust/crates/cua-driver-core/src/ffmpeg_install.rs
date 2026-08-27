@@ -8,7 +8,10 @@
 //! runs it. We never link ffmpeg; this installs the same user-provided
 //! binary the subprocess backend already looks for via `find_ffmpeg`.
 
+#[cfg(not(target_os = "windows"))]
 use std::process::Command;
+
+use crate::owned_process::{command, OwnedConsoleChildRole};
 
 /// A resolved install action: a human-readable manager name + the argv to run.
 pub struct InstallPlan {
@@ -25,7 +28,9 @@ impl InstallPlan {
 /// Is `name` an executable on PATH?
 fn cmd_exists(name: &str) -> bool {
     #[cfg(target_os = "windows")]
-    let probe = Command::new("where").arg(name).output();
+    let probe = command(OwnedConsoleChildRole::PathProbe, "where")
+        .arg(name)
+        .output();
     #[cfg(not(target_os = "windows"))]
     let probe = Command::new("sh")
         .arg("-c")
@@ -133,7 +138,7 @@ pub fn install_plan() -> Option<InstallPlan> {
 
 /// Run an install plan. Returns `(command_succeeded, combined_output_tail)`.
 pub fn run_install(plan: &InstallPlan) -> anyhow::Result<(bool, String)> {
-    let out = Command::new(&plan.argv[0])
+    let out = command(OwnedConsoleChildRole::Installer, &plan.argv[0])
         .args(&plan.argv[1..])
         .output()
         .map_err(|e| anyhow::anyhow!("failed to spawn `{}`: {e}", plan.argv[0]))?;
