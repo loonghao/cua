@@ -293,12 +293,15 @@ impl Drop for ManagedBrowser {
             // transfer the browser role to a descendant. The listener owner
             // was attested inside that driver-spawned process tree, so reap
             // that exact process tree when its owning session ends.
-            let _ = Command::new("taskkill.exe")
-                .args(["/PID", &self.owned_pid.to_string(), "/T", "/F"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let _ = crate::owned_process::command(
+                crate::owned_process::OwnedConsoleChildRole::BrowserProcessTreeCleanup,
+                "taskkill.exe",
+            )
+            .args(["/PID", &self.owned_pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();

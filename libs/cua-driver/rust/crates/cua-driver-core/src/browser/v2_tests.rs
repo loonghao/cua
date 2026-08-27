@@ -66,6 +66,15 @@ struct FixtureState {
     viewport_css_width: f64,
     viewport_css_height: f64,
     tab_visible: bool,
+    navigation_commits: bool,
+    navigation_redirect_url: Option<String>,
+    navigation_readback_url: Option<String>,
+    navigation_fails: bool,
+    activation_fails: bool,
+    readback_fails: bool,
+    readback_never_settles: bool,
+    target_present: bool,
+    drift_after_readback: bool,
     /// Every incoming CDP call: (sessionId, method, params).
     calls: Vec<(Option<String>, String, Value)>,
 }
@@ -95,6 +104,15 @@ impl Default for FixtureState {
             viewport_css_width: 800.0,
             viewport_css_height: 600.0,
             tab_visible: true,
+            navigation_commits: true,
+            navigation_redirect_url: None,
+            navigation_readback_url: None,
+            navigation_fails: false,
+            activation_fails: false,
+            readback_fails: false,
+            readback_never_settles: false,
+            target_present: true,
+            drift_after_readback: false,
             calls: Vec::new(),
         }
     }
@@ -646,13 +664,13 @@ fn fixture_handler(state: SharedState) -> MockHandler {
 
         match call.method.as_str() {
             "Target.getTargets" => MockReply::ok(json!({
-                "targetInfos": [{
+                "targetInfos": if st.target_present { vec![json!({
                     "targetId": "T1",
                     "type": "page",
                     "title": "Fixture",
                     "url": "https://fixture.test/",
                     "attached": false,
-                }]
+                })] } else { Vec::new() }
             })),
             "Browser.getWindowForTarget" => MockReply::ok(json!({ "windowId": 11 })),
             "Browser.getWindowBounds" => MockReply::ok(json!({
@@ -812,29 +830,61 @@ fn fixture_handler(state: SharedState) -> MockHandler {
             "Page.captureScreenshot" if is_tab => {
                 MockReply::ok(json!({"data": st.screenshot_data.clone()}))
             }
-            "Page.navigate" if is_tab => MockReply::ok(json!({
-                "frameId": "F_MAIN",
-                "loaderId": "L_MAIN_NAVIGATED",
-            })),
+            "Page.navigate" if is_tab => {
+                if st.navigation_fails {
+                    MockReply::err(-32000, "fixture navigation transport failure")
+                } else {
+                    if st.navigation_commits {
+                        st.main_loader = "L_MAIN_NAVIGATED".into();
+                        st.main_url = st.navigation_redirect_url.clone().unwrap_or_else(|| {
+                            call.params["url"].as_str().unwrap_or_default().into()
+                        });
+                    }
+                    MockReply::ok(json!({
+                        "frameId": "F_MAIN",
+                        "loaderId": "L_MAIN_NAVIGATED",
+                    }))
+                }
+            }
             "Target.activateTarget" => {
                 assert_eq!(call.params["targetId"], "T1");
-                st.tab_visible = true;
-                MockReply::ok(json!({}))
+                if st.activation_fails {
+                    MockReply::err(-32000, "fixture activation failure")
+                } else {
+                    st.tab_visible = true;
+                    MockReply::ok(json!({}))
+                }
             }
             "Runtime.evaluate"
                 if call.params["expression"]
                     .as_str()
                     .is_some_and(|value| value.starts_with("JSON.stringify({current_url:")) =>
             {
+                if st.readback_fails {
+                    return MockReply::err(-32000, "fixture readback failure");
+                }
+                let visible = if st.readback_never_settles {
+                    "hidden"
+                } else {
+                    "visible"
+                };
+                let ready = if st.readback_never_settles {
+                    "loading"
+                } else {
+                    "complete"
+                };
+                if st.drift_after_readback {
+                    st.target_present = false;
+                }
                 MockReply::ok(json!({
                     "result": {
                         "type": "string",
                         "value": serde_json::to_string(&json!({
-                            "current_url": "https://fixture.test/foreground-navigation",
+                            "current_url": st.navigation_readback_url.as_deref().unwrap_or(&st.main_url),
                             "title": "Foreground fixture",
                             "heading": "Activated tab",
-                            "visibility_state": "visible",
-                            "ready_state": "complete"
+                            "visibility_state": visible,
+                            "ready_state": ready
                         })).unwrap()
                     }
                 }))
@@ -2322,6 +2372,209 @@ async fn foreground_navigation_activates_the_exact_tab_and_returns_readback() {
     assert!(structured["title"].is_string(), "{structured}");
     assert!(structured["heading"].is_string(), "{structured}");
     assert_eq!(recorded_calls(&f, "Target.activateTarget").len(), 1);
+}
+
+#[tokio::test]
+async fn foreground_navigation_accepts_a_committed_redirect_on_the_same_loader() {
+    let f = fixture_with(|state| {
+        state.navigation_redirect_url = Some("https://fixture.test/redirected-final".into());
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/redirect-start",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = result.structured_content.as_ref().expect("success receipt");
+    assert_eq!(result.is_error, None, "{result:?}");
+    assert_eq!(receipt["status"], "ok", "{receipt}");
+    assert_eq!(
+        receipt["current_url"],
+        "https://fixture.test/redirected-final"
+    );
+    assert_eq!(receipt["readback_state"], "succeeded", "{receipt}");
+}
+
+#[tokio::test]
+async fn foreground_navigation_rejects_readback_from_a_prior_document() {
+    let f = fixture_with(|state| state.navigation_commits = false).await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/a-different-destination",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = result.structured_content.as_ref().expect("partial receipt");
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(receipt["status"], "error", "{receipt}");
+    assert_eq!(receipt["dispatched"], true, "{receipt}");
+    assert_eq!(receipt["activation_state"], "succeeded", "{receipt}");
+    assert_eq!(receipt["readback_state"], "stale_document", "{receipt}");
+    assert_eq!(
+        receipt["error_code"], "navigation_commit_not_observed",
+        "{receipt}"
+    );
+}
+
+#[tokio::test]
+async fn foreground_navigation_rejects_old_dom_after_loader_commit() {
+    let f = fixture_with(|state| {
+        state.navigation_readback_url = Some("https://fixture.test/prior-document".into());
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/new-document",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = result.structured_content.as_ref().expect("partial receipt");
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(receipt["dispatched"], true, "{receipt}");
+    assert_eq!(receipt["activation_state"], "succeeded", "{receipt}");
+    assert_eq!(receipt["readback_state"], "timeout", "{receipt}");
+    assert_eq!(
+        receipt["error_code"], "foreground_readback_timeout",
+        "{receipt}"
+    );
+}
+
+#[tokio::test]
+async fn foreground_navigation_activation_failure_returns_partial_receipt() {
+    let f = fixture_with(|state| state.activation_fails = true).await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/activation-failure",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = result.structured_content.as_ref().expect("partial receipt");
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(receipt["dispatched"], true, "{receipt}");
+    assert_eq!(receipt["activation_state"], "failed", "{receipt}");
+    assert_eq!(receipt["readback_state"], "not_started", "{receipt}");
+    assert_eq!(
+        receipt["error_code"], "target_activation_failed",
+        "{receipt}"
+    );
+}
+
+#[tokio::test]
+async fn foreground_navigation_readback_failure_returns_partial_receipt() {
+    let f = fixture_with(|state| state.readback_fails = true).await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/readback-failure",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = result.structured_content.as_ref().expect("partial receipt");
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(receipt["dispatched"], true, "{receipt}");
+    assert_eq!(receipt["activation_state"], "succeeded", "{receipt}");
+    assert_eq!(receipt["readback_state"], "failed", "{receipt}");
+    assert_eq!(
+        receipt["error_code"], "foreground_readback_failed",
+        "{receipt}"
+    );
+}
+
+#[tokio::test]
+async fn foreground_navigation_readback_timeout_returns_partial_receipt() {
+    let f = fixture_with(|state| state.readback_never_settles = true).await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/readback-timeout",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = result.structured_content.as_ref().expect("partial receipt");
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(receipt["dispatched"], true, "{receipt}");
+    assert_eq!(receipt["activation_state"], "succeeded", "{receipt}");
+    assert_eq!(receipt["readback_state"], "timeout", "{receipt}");
+    assert_eq!(
+        receipt["error_code"], "foreground_readback_timeout",
+        "{receipt}"
+    );
+}
+
+#[tokio::test]
+async fn foreground_navigation_dispatch_failure_is_distinguishable() {
+    let f = fixture_with(|state| state.navigation_fails = true).await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/dispatch-failure",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = result.structured_content.as_ref().expect("partial receipt");
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(receipt["dispatched"], false, "{receipt}");
+    assert_eq!(receipt["activation_state"], "not_started", "{receipt}");
+    assert_eq!(receipt["readback_state"], "not_started", "{receipt}");
+    assert_eq!(
+        receipt["error_code"], "navigation_dispatch_failed",
+        "{receipt}"
+    );
+}
+
+#[tokio::test]
+async fn foreground_navigation_target_drift_after_readback_fails_closed() {
+    let f = fixture_with(|state| state.drift_after_readback = true).await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/drift-after-readback",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = result.structured_content.as_ref().expect("partial receipt");
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(receipt["dispatched"], true, "{receipt}");
+    assert_eq!(receipt["activation_state"], "succeeded", "{receipt}");
+    assert_eq!(receipt["readback_state"], "succeeded", "{receipt}");
+    assert_eq!(receipt["error_code"], "target_drift_after_navigation");
 }
 
 #[tokio::test]

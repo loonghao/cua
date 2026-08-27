@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::owned_process::{command, OwnedConsoleChildRole};
 use crate::video::{VideoBackend, VideoBackendFactory, VideoMetadata};
 
 pub struct FfmpegVideoBackendFactory;
@@ -60,7 +61,7 @@ impl FfmpegVideoBackend {
             })?;
         }
 
-        let mut cmd = Command::new(&ffmpeg);
+        let mut cmd = command(OwnedConsoleChildRole::RecordingFfmpeg, &ffmpeg);
         cmd.arg("-y").arg("-loglevel").arg("error");
 
         platform_input_args(&mut cmd);
@@ -213,7 +214,7 @@ pub fn find_ffprobe() -> Option<PathBuf> {
 }
 
 pub(crate) fn find_ffmpeg() -> Option<PathBuf> {
-    if Command::new("ffmpeg")
+    if command(OwnedConsoleChildRole::PathProbe, "ffmpeg")
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -43,9 +43,44 @@ pub fn register_browser_tools(engine: &Arc<BrowserEngine>, registry: &mut ToolRe
 const FOREGROUND_READBACK_ATTEMPTS: usize = 50;
 const FOREGROUND_READBACK_INTERVAL: Duration = Duration::from_millis(100);
 
-async fn read_activated_tab(conn: &CdpConnection, cdp_session: &str) -> Result<Value, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForegroundReadbackError {
+    StaleDocument,
+    Failed,
+    Timeout,
+}
+
+async fn read_activated_tab(
+    conn: &CdpConnection,
+    cdp_session: &str,
+    expected_frame_id: &str,
+    expected_loader_id: Option<&str>,
+    requested_url: &str,
+) -> Result<Value, ForegroundReadbackError> {
     let expression = r#"JSON.stringify({current_url: location.href, title: document.title, heading: document.querySelector('h1,h2,[role=heading]')?.textContent?.trim() ?? '', visibility_state: document.visibilityState, ready_state: document.readyState})"#;
+    let mut committed_document_seen = false;
     for attempt in 0..FOREGROUND_READBACK_ATTEMPTS {
+        let frame_tree = conn
+            .call(Some(cdp_session), "Page.getFrameTree", json!({}))
+            .await
+            .map_err(|_| ForegroundReadbackError::Failed)?;
+        let frame = &frame_tree["frameTree"]["frame"];
+        let frame_matches = frame["id"].as_str() == Some(expected_frame_id);
+        let loader_matches = expected_loader_id
+            .map(|expected| frame["loaderId"].as_str() == Some(expected))
+            .unwrap_or(true);
+        if !frame_matches || !loader_matches {
+            if attempt + 1 < FOREGROUND_READBACK_ATTEMPTS {
+                sleep(FOREGROUND_READBACK_INTERVAL).await;
+                continue;
+            }
+            return Err(ForegroundReadbackError::StaleDocument);
+        }
+        let committed_url = frame["url"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or(ForegroundReadbackError::Failed)?;
+        committed_document_seen = true;
         let value = conn
             .call(
                 Some(cdp_session),
@@ -53,10 +88,12 @@ async fn read_activated_tab(conn: &CdpConnection, cdp_session: &str) -> Result<V
                 json!({"expression": expression, "returnByValue": true}),
             )
             .await
-            .map_err(|error| format!("foreground browser readback failed: {error}"))?;
+            .map_err(|_| ForegroundReadbackError::Failed)?;
         let encoded = value["result"]["value"].as_str().unwrap_or_default();
-        let readback: Value = serde_json::from_str(encoded)
-            .map_err(|error| format!("foreground browser readback was malformed: {error}"))?;
+        let readback: Value =
+            serde_json::from_str(encoded).map_err(|_| ForegroundReadbackError::Failed)?;
+        let same_document_matches = readback["current_url"].as_str() == Some(committed_url)
+            && (expected_loader_id.is_some() || committed_url == requested_url);
         let settled = matches!(
             readback["ready_state"].as_str(),
             Some("interactive" | "complete")
@@ -65,14 +102,45 @@ async fn read_activated_tab(conn: &CdpConnection, cdp_session: &str) -> Result<V
             && readback["current_url"].as_str().is_some()
             && readback["title"].as_str().is_some()
             && readback["heading"].as_str().is_some();
-        if settled && exact_fields {
+        if settled && exact_fields && same_document_matches {
             return Ok(readback);
         }
         if attempt + 1 < FOREGROUND_READBACK_ATTEMPTS {
             sleep(FOREGROUND_READBACK_INTERVAL).await;
         }
     }
-    Err("foreground browser activation did not produce settled visible readback".to_owned())
+    if committed_document_seen {
+        Err(ForegroundReadbackError::Timeout)
+    } else {
+        Err(ForegroundReadbackError::StaleDocument)
+    }
+}
+
+fn navigation_failure(
+    target_id: &str,
+    tab_id: &str,
+    url: &str,
+    delivery_mode: &str,
+    dispatched: bool,
+    activation_state: &str,
+    readback_state: &str,
+    error_code: &str,
+    message: &str,
+) -> ToolResult {
+    ToolResult::error(message).with_structured(json!({
+        "status": "error",
+        "target_id": target_id,
+        "tab_id": tab_id,
+        "url": url,
+        "delivery_mode": delivery_mode,
+        "dispatched": dispatched,
+        "activated": activation_state == "succeeded",
+        "activation_state": activation_state,
+        "readback_state": readback_state,
+        "refs_invalidated": dispatched,
+        "error_code": error_code,
+        "error": message,
+    }))
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
@@ -997,13 +1065,26 @@ impl Tool for BrowserNavigateTool {
             .await
         {
             Ok(result) => {
-                if let Some(err_text) = result.get("errorText").and_then(Value::as_str) {
-                    return ToolResult::error(format!("navigation failed: {err_text}"));
-                }
-                // Refs die with the old document.
+                // A delivered navigation attempt can replace the document even
+                // when Chromium reports an errorText. Fence all old refs before
+                // interpreting any post-dispatch outcome.
                 self.engine
                     .store
                     .invalidate_tab_snapshots(&session, &target_id, &tab_id);
+                if let Some(err_text) = result.get("errorText").and_then(Value::as_str) {
+                    let _ = err_text;
+                    return navigation_failure(
+                        &target_id,
+                        &tab_id,
+                        &url,
+                        delivery_mode,
+                        true,
+                        "not_started",
+                        "not_started",
+                        "navigation_rejected",
+                        "browser navigation was rejected",
+                    );
+                }
                 let readback = if delivery_mode == "foreground" {
                     if let Err(error) = validated
                         .conn
@@ -1014,13 +1095,102 @@ impl Tool for BrowserNavigateTool {
                         )
                         .await
                     {
-                        return ToolResult::error(format!("Target.activateTarget failed: {error}"));
+                        let _ = error;
+                        return navigation_failure(
+                            &target_id,
+                            &tab_id,
+                            &url,
+                            delivery_mode,
+                            true,
+                            "failed",
+                            "not_started",
+                            "target_activation_failed",
+                            "foreground target activation failed",
+                        );
                     }
-                    let readback =
-                        match read_activated_tab(&validated.conn, &validated.cdp_session).await {
-                            Ok(value) => value,
-                            Err(error) => return ToolResult::error(error),
-                        };
+                    let expected_frame_id = result["frameId"].as_str().unwrap_or_default();
+                    let expected_loader_id = result["loaderId"].as_str();
+                    if expected_frame_id.is_empty() {
+                        return navigation_failure(
+                            &target_id,
+                            &tab_id,
+                            &url,
+                            delivery_mode,
+                            true,
+                            "succeeded",
+                            "failed",
+                            "navigation_identity_missing",
+                            "browser navigation did not return a frame identity",
+                        );
+                    }
+                    let readback = match read_activated_tab(
+                        &validated.conn,
+                        &validated.cdp_session,
+                        expected_frame_id,
+                        expected_loader_id,
+                        &url,
+                    )
+                    .await
+                    {
+                        Ok(value) => value,
+                        Err(ForegroundReadbackError::StaleDocument) => {
+                            return navigation_failure(
+                                &target_id,
+                                &tab_id,
+                                &url,
+                                delivery_mode,
+                                true,
+                                "succeeded",
+                                "stale_document",
+                                "navigation_commit_not_observed",
+                                "foreground readback did not reach the dispatched navigation",
+                            )
+                        }
+                        Err(ForegroundReadbackError::Failed) => {
+                            return navigation_failure(
+                                &target_id,
+                                &tab_id,
+                                &url,
+                                delivery_mode,
+                                true,
+                                "succeeded",
+                                "failed",
+                                "foreground_readback_failed",
+                                "foreground browser readback failed",
+                            )
+                        }
+                        Err(ForegroundReadbackError::Timeout) => {
+                            return navigation_failure(
+                                &target_id,
+                                &tab_id,
+                                &url,
+                                delivery_mode,
+                                true,
+                                "succeeded",
+                                "timeout",
+                                "foreground_readback_timeout",
+                                "foreground browser readback timed out",
+                            )
+                        }
+                    };
+                    if self
+                        .engine
+                        .revalidate_for_mutation(&session, &target_id, Some(&tab_id))
+                        .await
+                        .is_err()
+                    {
+                        return navigation_failure(
+                            &target_id,
+                            &tab_id,
+                            &url,
+                            delivery_mode,
+                            true,
+                            "succeeded",
+                            "succeeded",
+                            "target_drift_after_navigation",
+                            "browser target identity changed after navigation",
+                        );
+                    }
                     Some(readback)
                 } else {
                     None
@@ -1031,7 +1201,10 @@ impl Tool for BrowserNavigateTool {
                     "tab_id": tab_id,
                     "url": url,
                     "delivery_mode": delivery_mode,
+                    "dispatched": true,
                     "activated": delivery_mode == "foreground",
+                    "activation_state": if delivery_mode == "foreground" { "succeeded" } else { "not_requested" },
+                    "readback_state": if delivery_mode == "foreground" { "succeeded" } else { "not_requested" },
                     "refs_invalidated": true,
                 });
                 if let Some(readback) = readback {
@@ -1043,7 +1216,20 @@ impl Tool for BrowserNavigateTool {
                 }
                 ToolResult::text(format!("navigated {tab_id} to {url}")).with_structured(structured)
             }
-            Err(e) => ToolResult::error(format!("Page.navigate failed: {e}")),
+            Err(e) => {
+                let _ = e;
+                navigation_failure(
+                    &target_id,
+                    &tab_id,
+                    &url,
+                    delivery_mode,
+                    false,
+                    "not_started",
+                    "not_started",
+                    "navigation_dispatch_failed",
+                    "browser navigation dispatch failed",
+                )
+            }
         }
     }
 }
