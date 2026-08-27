@@ -816,6 +816,29 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 "frameId": "F_MAIN",
                 "loaderId": "L_MAIN_NAVIGATED",
             })),
+            "Target.activateTarget" => {
+                assert_eq!(call.params["targetId"], "T1");
+                st.tab_visible = true;
+                MockReply::ok(json!({}))
+            }
+            "Runtime.evaluate"
+                if call.params["expression"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("JSON.stringify({current_url:")) =>
+            {
+                MockReply::ok(json!({
+                    "result": {
+                        "type": "string",
+                        "value": serde_json::to_string(&json!({
+                            "current_url": "https://fixture.test/foreground-navigation",
+                            "title": "Foreground fixture",
+                            "heading": "Activated tab",
+                            "visibility_state": "visible",
+                            "ready_state": "complete"
+                        })).unwrap()
+                    }
+                }))
+            }
             "Target.setAutoAttach" if is_tab => {
                 if call.params["autoAttach"].as_bool() == Some(false) {
                     return MockReply::ok(json!({}));
@@ -2269,6 +2292,54 @@ async fn navigation_targets_an_inactive_tab_without_activating_it() {
         "https://fixture.test/background-navigation"
     );
     assert!(recorded_calls(&f, "Page.bringToFront").is_empty());
+    assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
+}
+
+#[tokio::test]
+async fn foreground_navigation_activates_the_exact_tab_and_returns_readback() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/foreground-navigation",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let structured = result
+        .structured_content
+        .as_ref()
+        .expect("foreground navigation structured content");
+    assert_eq!(structured["status"], "ok", "{structured}");
+    assert_eq!(structured["delivery_mode"], "foreground", "{structured}");
+    assert_eq!(structured["activated"], true, "{structured}");
+    assert_eq!(structured["target_id"], target, "{structured}");
+    assert_eq!(structured["tab_id"], tab, "{structured}");
+    assert!(structured["current_url"].is_string(), "{structured}");
+    assert!(structured["title"].is_string(), "{structured}");
+    assert!(structured["heading"].is_string(), "{structured}");
+    assert_eq!(recorded_calls(&f, "Target.activateTarget").len(), 1);
+}
+
+#[tokio::test]
+async fn foreground_navigation_with_stale_identity_dispatches_no_cdp_action() {
+    let f = fixture().await;
+    let (target, _) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": "tab-stale",
+            "url": "https://fixture.test/must-not-run",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    assert_eq!(structured(&result)["status"], "refused", "{result:?}");
+    assert!(recorded_calls(&f, "Page.navigate").is_empty());
     assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
 }
 
