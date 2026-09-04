@@ -263,9 +263,9 @@ fn edge_gap(first: (i32, i32, i32, i32), second: (i32, i32, i32, i32)) -> Option
     }
 }
 
-fn select_language_independent_allow(
+fn select_language_independent_actions(
     candidates: &[ConsentButtonCandidate],
-) -> Result<usize, BrowserRefusal> {
+) -> Result<(usize, usize), BrowserRefusal> {
     // Chromium builds this modal from one separated extra action plus the
     // standard OK/Cancel pair. Accessible names are localized, and the whole
     // footer mirrors for RTL locales, but adjacency and separation are stable.
@@ -356,13 +356,16 @@ fn select_language_independent_allow(
             "the native Chromium consent prompt focus contradicted the structural cancel button",
         ));
     }
-    Ok(candidates[allow_index].element_ptr)
+    Ok((
+        candidates[allow_index].element_ptr,
+        candidates[cancel_index].element_ptr,
+    ))
 }
 
-fn structural_allow_actions_with<F>(
+fn structural_consent_actions_with<F>(
     nodes: &[UiaNode],
     mut properties: F,
-) -> Result<Vec<usize>, BrowserRefusal>
+) -> Result<Vec<(usize, usize)>, BrowserRefusal>
 where
     F: FnMut(usize) -> Result<(String, bool), BrowserRefusal>,
 {
@@ -397,9 +400,46 @@ where
                 has_keyboard_focus,
             });
         }
-        matches.push(select_language_independent_allow(&candidates)?);
+        matches.push(select_language_independent_actions(&candidates)?);
     }
     Ok(matches)
+}
+
+fn structural_allow_actions_with<F>(
+    nodes: &[UiaNode],
+    properties: F,
+) -> Result<Vec<usize>, BrowserRefusal>
+where
+    F: FnMut(usize) -> Result<(String, bool), BrowserRefusal>,
+{
+    Ok(structural_consent_actions_with(nodes, properties)?
+        .into_iter()
+        .map(|(allow, _)| allow)
+        .collect())
+}
+
+fn exact_cancel_button_with<F>(
+    nodes: &[UiaNode],
+    properties: F,
+) -> Result<Option<usize>, BrowserRefusal>
+where
+    F: FnMut(usize) -> Result<(String, bool), BrowserRefusal>,
+{
+    let mut actions = structural_consent_actions_with(nodes, properties)?;
+    actions.sort_unstable();
+    actions.dedup();
+    match actions.as_slice() {
+        [] => Ok(None),
+        [(_, cancel)] => Ok(Some(*cancel)),
+        _ => Err(refusal(
+            BrowserRefusalCode::BrowserWrongTargetRefused,
+            "multiple native Chromium consent prompts exposed distinct cancel actions",
+        )),
+    }
+}
+
+fn exact_cancel_button(nodes: &[UiaNode]) -> Result<Option<usize>, BrowserRefusal> {
+    exact_cancel_button_with(nodes, native_button_properties)
 }
 
 fn exact_allow_button_with<F>(
@@ -612,6 +652,40 @@ fn prove_window_owner(hwnd: u64, pid: u32) -> Result<(), BrowserRefusal> {
     Ok(())
 }
 
+pub fn dismiss(pid: u32, hwnd: u64) -> Result<bool, BrowserRefusal> {
+    prove_window_owner(hwnd, pid)?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut dismissed = false;
+    loop {
+        prove_window_owner(hwnd, pid)?;
+        let tree = crate::uia::walk_tree(hwnd, None);
+        let prompt_present = native_prompt_surface_present(&tree.nodes);
+        if !prompt_present {
+            release_nodes(&tree.nodes);
+            return Ok(dismissed);
+        }
+        let cancel = exact_cancel_button(&tree.nodes);
+        let invoked = match cancel {
+            Ok(Some(element)) => unsafe { invoke(element) },
+            Ok(None) => Err(refusal(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "the exact remote-debugging consent prompt exposed no structural cancel action",
+            )),
+            Err(error) => Err(error),
+        };
+        release_nodes(&tree.nodes);
+        invoked?;
+        dismissed = true;
+        if Instant::now() >= deadline {
+            return Err(refusal(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "the remote-debugging consent prompt remained after its exact cancel action",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 pub async fn handle(
     request: BrowserConsentRequest,
 ) -> Result<BrowserConsentOutcome, BrowserRefusal> {
@@ -780,6 +854,18 @@ mod tests {
                 Some(12)
             );
         }
+    }
+
+    #[test]
+    fn cancel_matcher_selects_the_structural_default_action() {
+        let nodes = prompt(
+            "Allow remote debugging?",
+            ["Turn off in settings", "Allow", "Cancel"],
+        );
+        assert_eq!(
+            exact_cancel_button_with(&nodes, properties).unwrap(),
+            Some(13)
+        );
     }
 
     #[test]
@@ -1076,6 +1162,106 @@ mod tests {
             })
             .unwrap_err()
             .code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+    }
+    #[test]
+    fn cancel_matcher_treats_nonempty_unicode_names_as_opaque_data() {
+        for (title, labels) in [
+            ("e\u{301}", ["é", "E\u{301}", "ë"]),
+            ("हिन्दी", ["ไทย", "עברית", "فارسی"]),
+            ("日本語", ["한국어", "简体中文", "繁體中文"]),
+            ("\u{2067}العربية\u{2069}", ["\u{2066}A\u{2069}", "👩🏽‍💻", "𐐷"]),
+            ("Հայերեն", ["ქართული", "አማርኛ", "বাংলা"]),
+            ("A\u{200d}B", ["無", "⠿", "✅"]),
+        ] {
+            assert_eq!(
+                exact_cancel_button_with(&prompt(title, labels), properties).unwrap(),
+                Some(13)
+            );
+        }
+    }
+    #[test]
+    fn cancel_matcher_is_direction_independent_for_rtl_dialog_layouts() {
+        let mut nodes = prompt(
+            "هل تريد السماح بتصحيح الأخطاء عن بُعد؟",
+            ["تعطيل", "سماح", "إلغاء"],
+        );
+        nodes[3].rect = Some((600, 343, 780, 399));
+        nodes[4].rect = Some((299, 343, 396, 399));
+        nodes[5].rect = Some((191, 343, 288, 399));
+        assert_eq!(
+            exact_cancel_button_with(&nodes, properties).unwrap(),
+            Some(13)
+        );
+    }
+    #[test]
+    fn cancel_matcher_does_not_require_focus_when_the_browser_is_inactive() {
+        let nodes = prompt(
+            "¿Permitir la depuración remota?",
+            ["Desactivar", "Permitir", "Cancelar"],
+        );
+        assert_eq!(
+            exact_cancel_button_with(&nodes, |_| {
+                Ok((CHROMIUM_DIALOG_BUTTON_CLASS.to_owned(), false))
+            })
+            .unwrap(),
+            Some(13)
+        );
+    }
+    #[test]
+    fn cancel_matcher_refuses_ambiguous_focus_or_button_geometry() {
+        let nodes = prompt("Qualsiasi lingua", ["A", "B", "C"]);
+        assert_eq!(
+            exact_cancel_button_with(&nodes, |element_ptr| {
+                Ok((CHROMIUM_DIALOG_BUTTON_CLASS.to_owned(), element_ptr >= 12))
+            })
+            .unwrap_err()
+            .code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+
+        let mut equidistant = nodes;
+        equidistant[3].rect = Some((-5700, 343, -5560, 399));
+        assert_eq!(
+            exact_cancel_button_with(&equidistant, properties)
+                .unwrap_err()
+                .code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+    }
+    #[test]
+    fn cancel_matcher_ignores_a_spoofed_prompt_inside_web_content() {
+        let mut nodes = prompt("Permitir depuração remota?", ["A", "B", "C"]);
+        for child in &mut nodes {
+            child.in_web_content = true;
+        }
+        assert_eq!(exact_cancel_button_with(&nodes, properties).unwrap(), None);
+    }
+    #[test]
+    fn cancel_matcher_deduplicates_repeated_native_prompt_surfaces_by_exact_action() {
+        let mut nodes = pane_rooted_prompt("first opaque title", ["A", "B", "C"]);
+        nodes.extend(pane_rooted_prompt("first opaque title", ["A", "B", "C"]));
+
+        assert_eq!(
+            exact_cancel_button_with(&nodes, properties).unwrap(),
+            Some(13)
+        );
+    }
+    #[test]
+    fn cancel_matcher_refuses_multiple_distinct_pane_rooted_native_prompts() {
+        let mut nodes = pane_rooted_prompt("first opaque title", ["A", "B", "C"]);
+        let mut second = pane_rooted_prompt("second opaque title", ["D", "E", "F"]);
+        for node in second.iter_mut().filter(|node| node.element_ptr != 0) {
+            node.element_ptr += 100;
+            node.element_index = Some(node.element_ptr);
+        }
+        nodes.extend(second);
+
+        assert_eq!(
+            exact_cancel_button_with(&nodes, properties)
+                .unwrap_err()
+                .code,
             BrowserRefusalCode::BrowserWrongTargetRefused
         );
     }
