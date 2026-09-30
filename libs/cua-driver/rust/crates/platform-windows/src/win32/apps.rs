@@ -81,6 +81,46 @@ fn descendants_from_processes(root_pid: u32, all: &[ProcessInfo]) -> Vec<u32> {
     result
 }
 
+/// Discover descendants and processes sharing an executable-name prefix.
+/// These are discovery candidates, not proof of launch ownership. Retained for
+/// callers of the existing public Win32 API; launch resolution must use
+/// `launched_processes` instead.
+pub fn related_processes(root_pid: u32, exe_basename: &str) -> Vec<u32> {
+    let mut out = list_descendants(root_pid);
+    let prefix = strip_version_suffix(exe_basename);
+    if !prefix.is_empty() {
+        let all = list_processes();
+        for p in &all {
+            let p_prefix = strip_version_suffix(&p.name);
+            if p_prefix.eq_ignore_ascii_case(&prefix) && !out.contains(&p.pid) {
+                out.push(p.pid);
+            }
+        }
+    }
+    out
+}
+
+fn strip_version_suffix(basename: &str) -> String {
+    let mut s = basename.to_ascii_lowercase();
+    if let Some(stripped) = s.strip_suffix(".exe") {
+        s = stripped.to_owned();
+    }
+    let bytes = s.as_bytes();
+    let mut cut = bytes.len();
+    while cut > 0 {
+        let c = bytes[cut - 1] as char;
+        if c.is_ascii_digit() || c == '.' || c == '-' {
+            cut -= 1;
+        } else {
+            break;
+        }
+    }
+    if cut == 0 {
+        return s;
+    }
+    s[..cut].to_string()
+}
+
 /// Return the launched PID and only its descendants absent before launch.
 /// Executable names do not establish ownership. The root comes from the native
 /// launch receipt and remains valid even when its window has not appeared yet.
