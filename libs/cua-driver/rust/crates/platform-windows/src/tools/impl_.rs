@@ -2096,24 +2096,15 @@ impl Tool for LaunchAppTool {
         } else {
             windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE.0
         };
-        // Snapshot the set of currently-running pids BEFORE we launch. The
-        // detached start_minimized polling task uses this to detect "any
-        // process that came into existence as a result of our launch", so
-        // it can minimize their windows too — covers the launcher-stub
-        // case (LibreOffice swriter.exe → soffice.bin, GIMP gimp-3.exe →
-        // gimp-3.2.exe, etc.) where the launched pid exits and a child
-        // process with a different name owns the actual window. Captured
-        // here (before the launch) so the new soffice.bin pid won't be
-        // in the snapshot.
-        let pre_launch_pids: std::sync::Arc<std::collections::HashSet<u32>> = if start_minimized {
-            let pids: std::collections::HashSet<u32> = crate::win32::list_processes()
+        // Capture ownership evidence before every launch, including launches
+        // that do not request minimization. Late windows may belong to renamed
+        // descendants, but another process with the same name is not ours.
+        let pre_launch_pids: std::sync::Arc<std::collections::HashSet<u32>> = std::sync::Arc::new(
+            crate::win32::list_processes()
                 .into_iter()
                 .map(|p| p.pid)
-                .collect();
-            std::sync::Arc::new(pids)
-        } else {
-            std::sync::Arc::new(std::collections::HashSet::new())
-        };
+                .collect(),
+        );
 
         // Capture the foreground window BEFORE any launch path runs so the
         // post-spawn polling restore (below) has a target HWND to flip back
@@ -2594,7 +2585,7 @@ impl Tool for LaunchAppTool {
         // `swriter.exe` → `soffice.bin`), the launched pid never gets a
         // window — list_windows(Some(pid)) stays empty forever. After the
         // primary retry budget we fall back to scanning the launched pid's
-        // descendant + name-related processes and pick the first one with a
+        // proven new descendants and pick the first one with a
         // window. The resolved pid is reflected in the response's `pid` field
         // so callers can target it with subsequent calls. See #1615.
         let mut windows_json: Vec<serde_json::Value> = Vec::new();
@@ -2657,9 +2648,7 @@ impl Tool for LaunchAppTool {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
         if windows_json.is_empty() {
-            // Launcher-stub fallback. Compute the exe basename from the
-            // launchable target so name-based matching has something to work
-            // with (e.g. "gimp-3.exe" → prefix "gimp" matches "gimp-3.2.exe").
+            // The basename controls only the retry budget, never ownership.
             let basename_for_match = target_file_opt
                 .as_deref()
                 .and_then(|t| t.rsplit(|c: char| c == '\\' || c == '/').next())
@@ -2678,9 +2667,9 @@ impl Tool for LaunchAppTool {
                 || bn_lower.starts_with("freecad");
             let max_candidate_attempts: usize = if is_slow_launcher { 30 } else { 3 };
 
-            let basename_clone = basename_for_match.clone();
+            let before_launch = pre_launch_pids.clone();
             let candidates_initial = tokio::task::spawn_blocking(move || {
-                crate::win32::related_processes(pid, &basename_clone)
+                crate::win32::launched_processes(pid, &before_launch)
             })
             .await
             .unwrap_or_default();
@@ -2728,9 +2717,9 @@ impl Tool for LaunchAppTool {
                 // Give the wrapper a moment to spawn before re-scanning.
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 total_attempts += 3; // count the 500ms wait as 3 attempts
-                let basename_rescan = basename_for_match.clone();
+                let before_launch = pre_launch_pids.clone();
                 let fresh = tokio::task::spawn_blocking(move || {
-                    crate::win32::related_processes(pid, &basename_rescan)
+                    crate::win32::launched_processes(pid, &before_launch)
                 })
                 .await
                 .unwrap_or_default();
@@ -2742,6 +2731,7 @@ impl Tool for LaunchAppTool {
                 // by falling through to the re-scan again.
             }
         }
+        let launched_pid = pid;
         let pid = resolved_pid;
 
         // start_minimized post-pass: drop every resolved window to the
@@ -2771,19 +2761,13 @@ impl Tool for LaunchAppTool {
                 .iter()
                 .filter_map(|w| w["window_id"].as_u64())
                 .collect();
-            // Capture pid + basename for the post-launch polling task to
-            // pick up launcher-stub child processes.
-            let stub_basename = target_file_opt
-                .as_deref()
-                .and_then(|t| t.rsplit(|c: char| c == '\\' || c == '/').next())
-                .unwrap_or("")
-                .to_owned();
-            // parent_pid is the launched pid family root — used below to
-            // constrain the post-launch minimize sweep to descendants /
-            // name-relatives of the launched app, so we don't accidentally
-            // minimize a user's unrelated app that started during the 5 s
+            // Capture the PID for the post-launch polling task to
+            // pick up launcher-stub child processes. Retain the original
+            // launch receipt root even when a descendant supplied the window.
+            // Constrain the post-launch minimize sweep to its new descendants,
+            // so we don't minimize an unrelated app that started during the 5 s
             // poll window.
-            let parent_pid = pid;
+            let parent_pid = launched_pid;
             let immediate_hwnds_for_poll = immediate_hwnds.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 use windows::Win32::Foundation::HWND;
@@ -2801,12 +2785,8 @@ impl Tool for LaunchAppTool {
             // window immediately after a successful launch.
             // Strategy: every 200 ms for 5 s, find pids that
             //   (a) weren't in the pre-launch snapshot, AND
-            //   (b) are part of the launched app's family — either a
-            //       descendant of the launched root pid, OR a process
-            //       sharing the launched binary's name prefix (covers
-            //       renamed-binary chains like swriter.exe → soffice.bin
-            //       where the child's name doesn't match but it's a
-            //       direct descendant).
+            //   (b) descend from the launched root pid. Renamed children such
+            //       as swriter.exe → soffice.bin retain their parent relationship.
             // Minimize THEIR visible windows only. Without the family
             // constraint, anything the user opens during the 5 s window
             // (Chrome, terminal, IDE) would also get minimized — that's
@@ -2816,7 +2796,6 @@ impl Tool for LaunchAppTool {
             // windows AND they remain minimized for three ticks — the typical
             // app has its main window up within ~2 s of launch.
             let pre_pids = pre_launch_pids.clone();
-            let basename_for_poll = stub_basename.clone();
             let launch_foreground_lock = foreground_lock.take();
             (async move {
                 use std::collections::HashSet;
@@ -2830,23 +2809,11 @@ impl Tool for LaunchAppTool {
                 let mut hit_count_total = minimized.len();
                 for _ in 0..25 {
                     let pre_pids_clone = pre_pids.clone();
-                    let basename_clone = basename_for_poll.clone();
-                    // Build the family pid set fresh each tick — both
-                    // descendant graph and name-relatives can grow as
+                    // Build the family pid set fresh each tick — the
+                    // descendant graph can grow as
                     // launcher-stub chains spawn deeper children.
                     let family_new_pids: Vec<u32> = tokio::task::spawn_blocking(move || {
-                        let related: std::collections::HashSet<u32> =
-                            crate::win32::related_processes(parent_pid, &basename_clone)
-                                .into_iter()
-                                .chain(std::iter::once(parent_pid))
-                                .collect();
-                        crate::win32::list_processes()
-                            .into_iter()
-                            .filter(|p| {
-                                !pre_pids_clone.contains(&p.pid) && related.contains(&p.pid)
-                            })
-                            .map(|p| p.pid)
-                            .collect()
+                        crate::win32::launched_processes(parent_pid, &pre_pids_clone)
                     })
                     .await
                     .unwrap_or_default();

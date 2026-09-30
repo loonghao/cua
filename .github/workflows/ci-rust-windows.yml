@@ -111,6 +111,9 @@ jobs:
       - name: Run Windows installed-app discovery unit tests
         working-directory: libs/cua-driver/rust
         run: "cargo test -p platform-windows win32::installed_apps::tests:: --lib --locked"
+      - name: Run Windows launch ownership regressions
+        working-directory: libs/cua-driver/rust
+        run: "cargo test -p platform-windows win32::apps::tests:: --lib --locked"
       - name: Run Windows app-name lookup tests
         working-directory: libs/cua-driver/rust
         run: "cargo test -p platform-windows launch_uwp::tests:: --lib --locked"
