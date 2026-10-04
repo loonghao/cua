@@ -489,7 +489,7 @@ fn current_token_write_probe(path: &std::path::Path, directory: bool, link: bool
             }
             Err(error) if error.code() == E_ACCESSDENIED => {}
             Err(error) => {
-                return WriteProbe::Failed(format!("{name} probe failed closed: {error}"))
+                return WriteProbe::Failed(format!("{name} probe failed closed: {error}"));
             }
         }
     }
@@ -564,7 +564,7 @@ fn windows_installation_write_access_with(
                 executable: None,
                 write_access: InstallationWriteAccess::Untrusted,
                 reason: None,
-            }
+            };
         }
         InstallationResolution::Untrusted(reason) => return untrusted(reason),
         InstallationResolution::Resolved(resolved) => resolved,
@@ -816,7 +816,7 @@ async fn active_port_endpoint(
             return Err(refusal(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("could not read the browser's DevToolsActivePort file: {error}"),
-            ))
+            ));
         }
     };
     let Some((port, path)) = parse_devtools_active_port(&text) else {
@@ -2509,7 +2509,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                             listener_pid: None,
                             detail: Some((*detail).to_owned()),
                         },
-                    })
+                    });
                 }
                 [] if std::time::Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2521,7 +2521,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                             "{} did not expose a uniquely exact-pid-owned loopback endpoint after the exact setup action",
                             descriptor.product_name
                         ),
-                    ))
+                    ));
                 }
                 _ => {
                     break Err(refusal(
@@ -2530,7 +2530,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                             "{} exposed multiple exact-pid-owned endpoint candidates after the exact setup action",
                             descriptor.product_name
                         ),
-                    ))
+                    ));
                 }
             }
         };
@@ -2796,8 +2796,13 @@ mod tests {
                     "bundle_id": null,
                     "launch_path": null,
                 });
-                assert_eq!(manifest.authorize_protected_resource(adapter, &resource).is_ok(), allowed,
-                    "{adapter} must use the live executable fingerprint even without an installed-app match");
+                assert_eq!(
+                    manifest
+                        .authorize_protected_resource(adapter, &resource)
+                        .is_ok(),
+                    allowed,
+                    "{adapter} must use the live executable fingerprint even without an installed-app match"
+                );
             }
         }
     }
@@ -3229,7 +3234,6 @@ mod tests {
             eprintln!(
                 "installed browser correctly refused for this write-capable runner token: {diagnostics:?}"
             );
-            return;
         }
     }
     use std::sync::atomic::{AtomicUsize, Ordering};

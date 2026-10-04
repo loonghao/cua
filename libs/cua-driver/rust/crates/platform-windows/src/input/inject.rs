@@ -282,7 +282,7 @@ fn pen_taps(sx: i32, sy: i32, barrel: bool, count: usize) -> Result<()> {
                 sleep(Duration::from_millis(70));
             }
         }
-        let _ = DestroySyntheticPointerDevice(dev);
+        DestroySyntheticPointerDevice(dev);
         result?;
     }
     Ok(())
@@ -460,57 +460,6 @@ pub fn window_is_iconic(hwnd: u64) -> bool {
     unsafe { IsIconic(HWND(hwnd as *mut _)).as_bool() }
 }
 
-#[cfg(test)]
-mod iconic_sentinel_tests {
-    use super::*;
-
-    /// The exact rect Win32 hands back for a minimized window, as documented on
-    /// the capture-path guard in `capture.rs`.
-    const ICONIC_RECT: (i32, i32, i32, i32) = (-32000, -32000, -31840, -31972);
-
-    #[test]
-    fn virtual_desktop_membership_has_no_magic_negative_ceiling() {
-        assert!(point_in_rect(-31920, 50, -40000, 0, 50000, 2000));
-    }
-
-    #[test]
-    fn iconic_center_is_outside_an_ordinary_virtual_desktop() {
-        let (left, top, right, bottom) = ICONIC_RECT;
-        let (cx, cy) = ((left + right) / 2, (top + bottom) / 2);
-        assert!(!point_in_rect(cx, cy, -2560, -1080, 6400, 3240));
-    }
-
-    #[test]
-    fn iconic_value_on_either_axis_is_outside_the_desktop() {
-        assert!(!point_in_rect(640, -32000, -2560, -1080, 6400, 3240));
-        assert!(!point_in_rect(-32000, 480, -2560, -1080, 6400, 3240));
-    }
-
-    #[test]
-    fn real_negative_origin_monitor_points_remain_valid() {
-        for (x, y) in [
-            (-1920, 0),
-            (-1795, 383),
-            (-2560, 0),
-            (0, -1080),
-            (-1920, -1080),
-            (0, 0),
-            (1920, 1080),
-        ] {
-            assert!(point_in_rect(x, y, -2560, -1080, 6400, 3240));
-        }
-    }
-
-    #[test]
-    fn virtual_desktop_edges_and_invalid_extents_fail_closed() {
-        assert!(point_in_rect(-1795, 383, -2560, -1080, 6400, 3240));
-        assert!(!point_in_rect(-2561, 383, -2560, -1080, 6400, 3240));
-        assert!(!point_in_rect(3840, 0, -2560, -1080, 6400, 3240));
-        assert!(!point_in_rect(0, 0, 0, 0, 0, 1080));
-        assert!(!point_in_rect(0, 0, 0, 0, 1920, -1));
-    }
-}
-
 /// One pen press-drag-release from screen `(sx0,sy0)` to `(sx1,sy1)`, with
 /// `steps` interpolated in-contact UPDATE points between the down and the up.
 /// A single synthetic pen device is created for the whole stroke. The barrel
@@ -568,7 +517,7 @@ fn pen_drag(sx0: i32, sy0: i32, sx1: i32, sy1: i32, steps: usize, barrel: bool) 
         sleep(Duration::from_millis(8));
         let up = mk(POINTER_FLAG_UP, sx1, sy1);
         res = res.and(InjectSyntheticPointerInput(dev, &[up]));
-        let _ = DestroySyntheticPointerDevice(dev);
+        DestroySyntheticPointerDevice(dev);
         res.map_err(|e| anyhow::anyhow!("InjectSyntheticPointerInput(pen drag): {e}"))?;
     }
     Ok(())
@@ -771,3 +720,54 @@ pub fn inject_drag_screen(
 // WPF/terminal text) is now reported as `background_unavailable`; the agent
 // escalates to `delivery_mode:"foreground"`, which uses the explicit
 // SetForegroundWindow path (send_key_synthesized / send_text_synthesized).
+
+#[cfg(test)]
+mod iconic_sentinel_tests {
+    use super::*;
+
+    /// The exact rect Win32 hands back for a minimized window, as documented on
+    /// the capture-path guard in `capture.rs`.
+    const ICONIC_RECT: (i32, i32, i32, i32) = (-32000, -32000, -31840, -31972);
+
+    #[test]
+    fn virtual_desktop_membership_has_no_magic_negative_ceiling() {
+        assert!(point_in_rect(-31920, 50, -40000, 0, 50000, 2000));
+    }
+
+    #[test]
+    fn iconic_center_is_outside_an_ordinary_virtual_desktop() {
+        let (left, top, right, bottom) = ICONIC_RECT;
+        let (cx, cy) = ((left + right) / 2, (top + bottom) / 2);
+        assert!(!point_in_rect(cx, cy, -2560, -1080, 6400, 3240));
+    }
+
+    #[test]
+    fn iconic_value_on_either_axis_is_outside_the_desktop() {
+        assert!(!point_in_rect(640, -32000, -2560, -1080, 6400, 3240));
+        assert!(!point_in_rect(-32000, 480, -2560, -1080, 6400, 3240));
+    }
+
+    #[test]
+    fn real_negative_origin_monitor_points_remain_valid() {
+        for (x, y) in [
+            (-1920, 0),
+            (-1795, 383),
+            (-2560, 0),
+            (0, -1080),
+            (-1920, -1080),
+            (0, 0),
+            (1920, 1080),
+        ] {
+            assert!(point_in_rect(x, y, -2560, -1080, 6400, 3240));
+        }
+    }
+
+    #[test]
+    fn virtual_desktop_edges_and_invalid_extents_fail_closed() {
+        assert!(point_in_rect(-1795, 383, -2560, -1080, 6400, 3240));
+        assert!(!point_in_rect(-2561, 383, -2560, -1080, 6400, 3240));
+        assert!(!point_in_rect(3840, 0, -2560, -1080, 6400, 3240));
+        assert!(!point_in_rect(0, 0, 0, 0, 0, 1080));
+        assert!(!point_in_rect(0, 0, 0, 0, 1920, -1));
+    }
+}
