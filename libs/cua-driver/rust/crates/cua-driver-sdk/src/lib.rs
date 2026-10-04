@@ -1856,7 +1856,7 @@ impl ToolResult {
             if !self.images.is_empty() {
                 let metadata = &raw["structuredContent"];
                 for dimension in ["screenshot_width", "screenshot_height"] {
-                    if !metadata[dimension].as_u64().is_some_and(|value| value > 0) {
+                    if metadata[dimension].as_u64().is_none_or(|value| value == 0) {
                         return Err(DriverError::Protocol {
                             reason: format!("get_window_state image omitted valid {dimension}"),
                         });
