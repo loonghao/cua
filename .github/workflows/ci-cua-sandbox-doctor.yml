@@ -11,6 +11,7 @@ name: "CI: Image doctor with the driver and daemon under test"
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "libs/cua-spacesd/**"
       - "libs/cua-driver/rust/Cargo.lock"
@@ -44,6 +45,7 @@ env:
 
 jobs:
   doctor:
+    if: ${{ github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-')))) }}
     name: Image doctor (overlaid cua-spacesd and cua-driver)
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -88,6 +90,7 @@ jobs:
             PY
 
   stale:
+    if: ${{ github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-')))) }}
     name: The bundled builds are reported stale
     runs-on: ubuntu-latest
     timeout-minutes: 45

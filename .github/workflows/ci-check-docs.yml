@@ -2,6 +2,7 @@ name: "CI: Check Docs"
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "libs/cua-driver/rust/crates/**"
       - "libs/cua-driver/rust/Cargo.toml"
@@ -58,6 +59,7 @@ jobs:
   # affect. Unaffected rows previously booted a macOS or Windows runner just to
   # decide to skip.
   scope:
+    if: ${{ github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-')))) }}
     name: Select affected generators
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -122,7 +124,7 @@ jobs:
   native-reference:
     name: Reference / ${{ matrix.library }} / ${{ matrix.platform }}
     needs: scope
-    if: needs.scope.outputs.selected == 'true'
+    if: ${{ (needs.scope.outputs.selected == 'true') && (github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-'))))) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
@@ -250,7 +252,7 @@ jobs:
 
   check-docs-sync:
     name: Check Documentation Sync
-    if: always()
+    if: ${{ (always()) && (github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-'))))) }}
     needs: [scope, native-reference]
     runs-on: ubuntu-latest
     timeout-minutes: 5

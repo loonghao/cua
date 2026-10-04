@@ -2,6 +2,7 @@ name: "CI: cua-driver contract clients"
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "libs/cua-driver/contract/**"
       - "libs/cua-driver/compat-fixtures/**"
@@ -72,6 +73,7 @@ env:
 
 jobs:
   mcp-client-discovery:
+    if: ${{ github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-')))) }}
     name: MCP discovery in pinned clients (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -131,6 +133,7 @@ jobs:
         run: node .github/scripts/cua-driver-mcp-compat/verify-modern.mjs
 
   runtime-parity:
+    if: ${{ github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-')))) }}
     name: Portable contract parity (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -211,6 +214,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Session 0 dump-docs failed with exit $LASTEXITCODE" }
 
   verify:
+    if: ${{ github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-')))) }}
     name: Generated contract and SDK bindings
     runs-on: ubuntu-latest
     timeout-minutes: 30

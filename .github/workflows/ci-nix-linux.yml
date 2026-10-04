@@ -4,6 +4,7 @@ name: "CI: Nix Linux Rust source"
 # desktop behavior is owned by the Rust E2E workflows.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "flake.nix"
       - "flake.lock"
@@ -58,6 +59,7 @@ env:
 
 jobs:
   rust-source:
+    if: ${{ github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-')))) }}
     name: Nix / ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 60

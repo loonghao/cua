@@ -2,6 +2,7 @@ name: "CI: Cua Driver quick feedback (non-certifying)"
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "libs/cua-driver/rust/**"
       - "libs/cua-driver/tests/fixtures/shared/web/**"
@@ -22,6 +23,7 @@ env:
 
 jobs:
   focused:
+    if: ${{ github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-')))) }}
     name: "Linux / focused contracts (not desktop certification)"
     runs-on: ubuntu-latest
     timeout-minutes: 20

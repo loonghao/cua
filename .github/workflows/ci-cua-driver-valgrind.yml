@@ -2,6 +2,7 @@ name: "CI: cua-driver Valgrind"
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "libs/cua-driver/rust/**"
       - "scripts/ci/linux/run-valgrind-e2e.py"
@@ -30,6 +31,7 @@ env:
 
 jobs:
   memcheck:
+    if: ${{ github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-')))) }}
     name: Driver server E2E Memcheck
     # Memcheck results depend on the image's valgrind/glibc pairing, so pin
     # the runner instead of tracking ubuntu-latest migrations.

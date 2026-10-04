@@ -16,6 +16,7 @@ on:
       - ".github/workflows/ci-image-api.yml"
       - ".github/workflows/cd-image-api.yml"
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "clusters/base/cua-images/**"
       - "libs/python/cua-sandbox/cua_sandbox/image.py"
@@ -41,6 +42,7 @@ env:
 
 jobs:
   validate:
+    if: ${{ github.repository != 'loonghao/cua' || ((github.event_name != 'pull_request' || github.event.pull_request.base.ref != 'dcc-driver-0.33.2-upstream' || github.event.pull_request.draft == false) && (github.event_name != 'push' || (github.ref != 'refs/heads/dcc-driver-0.33.2-upstream' && !startsWith(github.ref, 'refs/heads/dcc-driver-0.33.2-compat-candidate-')))) }}
     runs-on: ubuntu-latest
     # A cold release build of the cua SDK library alone takes 15 minutes or
     # more on a hosted runner (both runs on PR #19 were cancelled mid-build
