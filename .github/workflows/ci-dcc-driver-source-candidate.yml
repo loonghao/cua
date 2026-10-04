@@ -68,7 +68,7 @@ jobs:
           workspaces: "libs/cua-driver/rust -> target"
           key: dcc-source-only
       - name: Check formatting
-        run: cargo fmt --manifest-path libs/cua-driver/rust/Cargo.toml --all -- --check
+        run: cargo +1.95.0-x86_64-pc-windows-msvc fmt --manifest-path libs/cua-driver/rust/Cargo.toml --all -- --check
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
@@ -85,10 +85,10 @@ jobs:
         run: python -B -m pytest -p no:cacheprovider -q .github/scripts/tests/test_cua_driver_e2e_inventory.py
       - name: Strict whole-package source lint
         working-directory: libs/cua-driver/rust
-        run: cargo clippy --locked -p cua-driver -p cua-driver-e2e -p cua-driver-core -p cua-driver-sdk -p cua-driver-testkit -p cursor-overlay -p cursor-theme-cli -p platform-windows -p cua-driver-uia --all-targets -- -D warnings
+        run: cargo +1.95.0-x86_64-pc-windows-msvc clippy --locked -p cua-driver -p cua-driver-e2e -p cua-driver-core -p cua-driver-sdk -p cua-driver-testkit -p cursor-overlay -p cursor-theme-cli -p platform-windows -p cua-driver-uia --all-targets -- -D warnings
       - name: Compile every test target without executing it
         working-directory: libs/cua-driver/rust
-        run: cargo test --locked -p cua-driver -p cua-driver-e2e -p cua-driver-core -p cua-driver-sdk -p cua-driver-testkit -p cursor-overlay -p cursor-theme-cli -p platform-windows -p cua-driver-uia --all-targets --no-run
+        run: cargo +1.95.0-x86_64-pc-windows-msvc test --locked -p cua-driver -p cua-driver-e2e -p cua-driver-core -p cua-driver-sdk -p cua-driver-testkit -p cursor-overlay -p cursor-theme-cli -p platform-windows -p cua-driver-uia --all-targets --no-run
       - name: Record source-only boundary
         shell: pwsh
         run: |
