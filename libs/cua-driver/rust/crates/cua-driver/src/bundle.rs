@@ -60,6 +60,10 @@ pub fn user_home_subdirectory() -> &'static str {
 }
 
 #[cfg(target_os = "windows")]
+#[expect(
+    dead_code,
+    reason = "Retain the reserved UIA worker identity without enabling an unauthenticated forwarding path"
+)]
 pub fn uia_executable_name() -> &'static str {
     if is_local_installation() {
         "cua-driver-uia-local.exe"
@@ -115,7 +119,7 @@ pub fn is_executable_inside_cuadriver_app() -> bool {
 
 /// Returns `true` when the env var is one of `1|true|yes|on`
 /// (case-insensitive). Anything else, including unset, is falsy.
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", test))]
 pub fn is_env_truthy(name: &str) -> bool {
     match std::env::var(name) {
         Ok(value) => matches!(
