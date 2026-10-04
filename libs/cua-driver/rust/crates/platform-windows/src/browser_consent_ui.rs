@@ -450,7 +450,6 @@ where
     Ok(exact_consent_actions_with(nodes, properties)?.map(|actions| actions.0))
 }
 
-
 fn native_window_is_exact_target_owned(
     prompt_hwnd: u64,
     target_pid: u32,
@@ -468,7 +467,6 @@ fn native_window_is_exact_target_owned(
                 .unwrap_or_default();
             (!owner.0.is_null()).then_some(owner.0 as usize as u64)
         })
-
 }
 
 fn target_owned_windows_by_z_order(target_pid: u32, target_hwnd: u64) -> Vec<(u64, usize)> {
@@ -866,10 +864,8 @@ mod tests {
             "\u{2067}opaque \u{0627}\u{2069}",
             ["e\u{301}", "\u{1f469}\u{200d}\u{1f4bb}", "\u{0628}"],
         );
-        let mut second = pane_rooted_prompt(
-            "second opaque title",
-            ["\u{4e2d}", "\u{1f680}", "cancel"],
-        );
+        let mut second =
+            pane_rooted_prompt("second opaque title", ["\u{4e2d}", "\u{1f680}", "cancel"]);
         for node in second.iter_mut().filter(|node| node.element_ptr != 0) {
             if node.element_ptr != 12 {
                 node.element_ptr += 100;
