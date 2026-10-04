@@ -50,15 +50,17 @@ mod tests {
     fn visible_window_count(pid: u32) -> usize {
         let mut state = WindowCount { pid, visible: 0 };
         unsafe {
-            let _ = EnumWindows(
+            EnumWindows(
                 Some(count_visible_child_windows),
                 LPARAM(&mut state as *mut WindowCount as isize),
-            );
+            )
+            .expect("enumerate windows on the prepared interactive desktop");
         }
         state.visible
     }
 
     #[test]
+    #[ignore = "requires a disposable interactive Windows desktop; canonical native runner"]
     fn hidden_helper_has_no_visible_console_window() {
         let mut child = std_hidden("powershell.exe")
             .args([

@@ -764,14 +764,17 @@ impl DomIndex {
                 })
                 .collect::<Vec<_>>();
             match matches.as_slice() {
-                [(&backend, candidate)] if is_file_input(candidate) => Some(backend),
-                _ => None,
+                [] => Ok(None),
+                [(&backend, candidate)] => Ok(is_file_input(candidate).then_some(backend)),
+                // A duplicate id invalidates the whole association, even if
+                // another aria-controls token or label resolves uniquely.
+                _ => Err(()),
             }
         };
 
         if let Some(ids) = source_meta.attrs.get("aria-controls") {
             for id in ids.split_ascii_whitespace().filter(|id| !id.is_empty()) {
-                candidates.extend(id_target(id));
+                candidates.extend(id_target(id).ok()?);
             }
         }
 
@@ -786,7 +789,7 @@ impl DomIndex {
                 if let Some(id) = meta.attrs.get("for").filter(|id| !id.trim().is_empty()) {
                     let id = id.trim();
                     if !id.chars().any(char::is_whitespace) {
-                        candidates.extend(id_target(id));
+                        candidates.extend(id_target(id).ok()?);
                     }
                 } else {
                     for (&candidate_backend, candidate) in &self.nodes {
@@ -2026,6 +2029,33 @@ mod tests {
             .expect("visible chooser");
         assert!(!chooser.actions.contains(&BrowserActionKind::Upload));
     }
+    #[test]
+    fn mixed_duplicate_and_unique_file_input_ids_fail_closed_in_either_order() {
+        for controls in ["duplicate unique", "unique duplicate"] {
+            for duplicate_tag in ["INPUT", "DIV"] {
+                let dom = build_dom_index(&json!({
+                    "nodeType": 9,
+                    "frameId": "F_MAIN",
+                    "children": [
+                        {"nodeType": 1, "nodeName": "BUTTON", "backendNodeId": 10,
+                         "attributes": ["aria-controls", controls]},
+                        {"nodeType": 1, "nodeName": "INPUT", "backendNodeId": 11,
+                         "attributes": ["id", "duplicate", "type", "file", "style", "display:none"]},
+                        {"nodeType": 1, "nodeName": duplicate_tag, "backendNodeId": 12,
+                         "attributes": ["id", "duplicate", "type", "file", "style", "display:none"]},
+                        {"nodeType": 1, "nodeName": "INPUT", "backendNodeId": 13,
+                         "attributes": ["id", "unique", "type", "file", "style", "display:none"]}
+                    ]
+                }));
+                assert_eq!(
+                    dom.unique_associated_file_input(10),
+                    None,
+                    "controls={controls} duplicate_tag={duplicate_tag}"
+                );
+            }
+        }
+    }
+
     use crate::browser::store::FrameRef;
 
     fn frame() -> FrameRef {

@@ -62,6 +62,7 @@ struct FixtureState {
     semantic_truncated_dom: bool,
     hidden_file_input: bool,
     ambiguous_hidden_file_input: bool,
+    mixed_hidden_file_input_controls: Option<String>,
     screenshot_data: String,
     viewport_css_width: f64,
     viewport_css_height: f64,
@@ -111,6 +112,7 @@ impl Default for FixtureState {
             semantic_truncated_dom: false,
             hidden_file_input: false,
             ambiguous_hidden_file_input: false,
+            mixed_hidden_file_input_controls: None,
             screenshot_data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZJrAAAAAASUVORK5CYII=".into(),
             viewport_css_width: 800.0,
             viewport_css_height: 600.0,
@@ -225,7 +227,7 @@ fn main_document() -> Value {
     })
 }
 
-fn hidden_file_input_document(ambiguous: bool) -> Value {
+fn hidden_file_input_document(ambiguous: bool, mixed_controls: Option<&str>) -> Value {
     let mut children = vec![
         json!({
             "nodeType": 1,
@@ -246,6 +248,20 @@ fn hidden_file_input_document(ambiguous: bool) -> Value {
             "nodeName": "INPUT",
             "backendNodeId": 52,
             "attributes": ["id", "package-file", "type", "file", "style", "display:none"],
+        }));
+    }
+    if let Some(controls) = mixed_controls {
+        children[0] = json!({
+            "nodeType": 1,
+            "nodeName": "BUTTON",
+            "backendNodeId": 50,
+            "attributes": ["aria-controls", controls, "aria-label", "Choose package"],
+        });
+        children.push(json!({
+            "nodeType": 1,
+            "nodeName": "INPUT",
+            "backendNodeId": 53,
+            "attributes": ["id", "unique-file", "type", "file", "style", "display:none"],
         }));
     }
     json!({
@@ -754,7 +770,10 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     MockReply::ok(truncated_semantic_document())
                 } else {
                     MockReply::ok(if st.hidden_file_input {
-                        hidden_file_input_document(st.ambiguous_hidden_file_input)
+                        hidden_file_input_document(
+                            st.ambiguous_hidden_file_input,
+                            st.mixed_hidden_file_input_controls.as_deref(),
+                        )
                     } else if st.semantic_scoped_rows {
                         scoped_rows_semantic_document("F_MAIN")
                     } else if st.semantic_large_page {
@@ -2821,6 +2840,45 @@ async fn semantic_upload_rejects_ambiguous_hidden_file_input_associations() {
     );
     assert!(recorded_calls(&f, "DOM.describeNode").is_empty());
     assert!(recorded_calls(&f, "DOM.setFileInputFiles").is_empty());
+}
+
+#[tokio::test]
+async fn semantic_upload_rejects_mixed_duplicate_and_unique_hidden_file_input_ids() {
+    for controls in ["package-file unique-file", "unique-file package-file"] {
+        let f = fixture_with(|state| {
+            state.hidden_file_input = true;
+            state.ambiguous_hidden_file_input = true;
+            state.mixed_hidden_file_input_controls = Some(controls.to_owned());
+        })
+        .await;
+        let (target, tab) = bind(&f).await;
+        let snap = semantic_snapshot(&f, &target, &tab).await;
+        let chooser = snap["refs"]
+            .as_array()
+            .and_then(|refs| refs.iter().find(|entry| entry["name"] == "Choose package"))
+            .expect("visible chooser ref");
+        assert!(chooser["actions"]
+            .as_array()
+            .is_some_and(|actions| actions.iter().all(|action| action != "upload")));
+        let upload = tempfile::NamedTempFile::new().expect("upload fixture");
+        let result = BrowserSetInputFilesTool::new(f.engine.clone())
+            .invoke(json!({
+                "target_id": target,
+                "tab_id": tab,
+                "session": SESSION,
+                "ref": chooser["ref"],
+                "files": [upload.path().to_string_lossy()]
+            }))
+            .await;
+        assert_eq!(
+            structured(&result)["refusal"]["code"],
+            "browser_action_unavailable",
+            "controls={controls} result={}",
+            structured(&result)
+        );
+        assert!(recorded_calls(&f, "DOM.describeNode").is_empty());
+        assert!(recorded_calls(&f, "DOM.setFileInputFiles").is_empty());
+    }
 }
 
 #[tokio::test]

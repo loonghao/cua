@@ -54,15 +54,17 @@ mod tests {
     fn visible_window_count(pid: u32) -> usize {
         let mut state = WindowCount { pid, visible: 0 };
         unsafe {
-            let _ = EnumWindows(
+            EnumWindows(
                 Some(count_visible_child_windows),
                 LPARAM(&mut state as *mut WindowCount as isize),
-            );
+            )
+            .expect("enumerate windows on the prepared interactive desktop");
         }
         state.visible
     }
 
     #[test]
+    #[ignore = "requires a disposable interactive Windows desktop; canonical native runner"]
     fn every_owned_console_child_role_is_hidden_and_preserves_pipes_and_lifecycle() {
         assert_eq!(CREATE_NO_WINDOW_FLAG, 0x0800_0000);
         for role in [
