@@ -1,6 +1,6 @@
 # DCC compatibility source candidate
 
-The candidate is based on official stable Driver 0.33.2, tag
+The candidate is based on selected Driver 0.33.2 source, tag
 cua-driver-rs-v0.33.2 at c82d32e3e1adbc6578a148962002ddf6e3e8a15a.
 Its actual pull-request baseline is the CI-only staging commit
 8ba30be06ba33c8c6f1ebb2439e6b9a64c46ad7f. That baseline leaves the official Rust tree
@@ -30,3 +30,23 @@ These skipped jobs are pending evidence, not native acceptance. The canonical
 desktop matrix must run on the final candidate before ready or merge. No
 release tag, distribution promotion or installed runtime change is made by this
 source draft.
+## Release metadata and fixed evaluation target
+
+The selected component release is Driver 0.33.2 at the exact upstream tag above.
+Its GitHub release API reports prerelease=true. The official release body separately
+states that plain Driver SemVer releases use the component stable channels and
+that the GitHub label keeps the monorepo Latest pointer from switching products.
+These are distinct metadata facts; this draft does not claim an unconditional
+latest stable release or use the repository-wide Latest endpoint.
+
+Driver 0.33.3 was discovered during this work, with the same API label and an
+independent official component-channel explanation. Its source and consent changes
+were evaluated in an isolated checkout only. That evaluation has not been published,
+pinned in this DCC candidate, installed, or used for the candidate build. The
+coordinated delivery target remains 0.33.2; it is separate from the Cua client SDK
+product release stream.
+
+The strict source-lint cleanup preserves optional-role refusal, prompt redaction,
+private containment naming and existing lock contents. Lock opens explicitly use
+truncate(false). A reasoned annotation is confined to the private nine-field
+navigation receipt builder; the whole-package -D warnings gate remains enabled.
