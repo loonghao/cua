@@ -116,6 +116,10 @@ async fn read_activated_tab(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep the explicit target, delivery and readback receipt fields visible at each failure site"
+)]
 fn navigation_failure(
     target_id: &str,
     tab_id: &str,
