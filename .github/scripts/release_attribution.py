@@ -1393,17 +1393,57 @@ def validate_pr_command(args: argparse.Namespace) -> None:
     head_sha = str(head.get("sha") or "")
     if not head_repository or not head_sha:
         raise ReleaseError(f"pull request #{number} has no readable head repository")
+    if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        raise ReleaseError(f"pull request #{number} has no full head commit SHA")
+
+    base = pull.get("base") or {}
+    base_repository = base.get("repo") if isinstance(base, Mapping) else None
+    if not isinstance(base_repository, Mapping) or base_repository.get("full_name") != repository:
+        raise ReleaseError(f"pull request #{number} has an invalid target repository")
+    base_ref = base.get("ref")
+    if not isinstance(base_ref, str) or not base_ref:
+        raise ReleaseError(f"pull request #{number} has an invalid target branch ref")
+    try:
+        run_git(Path.cwd(), "check-ref-format", f"refs/heads/{base_ref}")
+    except ReleaseError as error:
+        raise ReleaseError(f"pull request #{number} has an invalid target branch ref") from error
+    reference = client.get(f"repos/{repository}/git/ref/heads/{quote(base_ref, safe='')}")
+    target = reference.get("object") if isinstance(reference, Mapping) else None
+    target_sha = str(target.get("sha") or "") if isinstance(target, Mapping) else ""
+    if (
+        not isinstance(reference, Mapping)
+        or reference.get("ref") != f"refs/heads/{base_ref}"
+        or not isinstance(target, Mapping)
+        or target.get("type") != "commit"
+        or not re.fullmatch(r"[0-9a-f]{40}", target_sha)
+    ):
+        raise ReleaseError(f"GitHub returned an invalid target branch commit for pull request #{number}")
 
     commits = client.all_pull_commits(repository, {**pull, "number": number})
 
     base_config = json.loads(args.config.read_text())
+    target_config = client.file_json(repository, args.config.as_posix(), target_sha)
+    if not isinstance(target_config.get("identityOverrides"), Mapping):
+        raise ReleaseError("target attribution config must contain identityOverrides as a JSON object")
+    trusted_overrides = _normalized_map(base_config, "identityOverrides")
+    target_overrides = _normalized_map(target_config, "identityOverrides")
+    conflicts = sorted(
+        email for email in trusted_overrides.keys() & target_overrides.keys()
+        if trusted_overrides[email] != target_overrides[email]
+    )
+    if conflicts:
+        raise ReleaseError("target identityOverrides conflict with trusted policy: " + ", ".join(conflicts))
+    # Only inherited identity mappings come from the verified target. All other
+    # policy remains the trusted checkout's configuration, never the PR's.
+    base_config = {**base_config, "identityOverrides": {**trusted_overrides, **target_overrides}}
     head_config = client.file_json(head_repository, args.config.as_posix(), head_sha)
-    trusted_sha = run_git(Path.cwd(), "rev-parse", "HEAD").strip()
+    # Compare through the actual target's ancestor so a stale, unchanged PR
+    # still uses current policy without treating inherited mappings as edits.
     comparison = client.get(
-        f"repos/{repository}/compare/{trusted_sha}...{head_sha}?per_page=1"
+        f"repos/{repository}/compare/{target_sha}...{head_sha}?per_page=1"
     )
     ancestor_sha = str((comparison.get("merge_base_commit") or {}).get("sha") or "")
-    if not ancestor_sha:
+    if not re.fullmatch(r"[0-9a-f]{40}", ancestor_sha):
         raise ReleaseError("GitHub returned no merge base for attribution validation")
     ancestor_config = client.file_json(repository, args.config.as_posix(), ancestor_sha)
     ancestor_overrides = _normalized_map(ancestor_config, "identityOverrides")
