@@ -3,10 +3,10 @@
 
 use std::process::{Command, Stdio};
 
-fn test_socket(directory: &tempfile::TempDir, suffix: &str) -> String {
+fn test_socket(_directory: &tempfile::TempDir, suffix: &str) -> String {
     #[cfg(unix)]
     {
-        directory
+        _directory
             .path()
             .join(format!("{suffix}.sock"))
             .display()

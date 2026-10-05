@@ -51,6 +51,11 @@ use windows::Win32::UI::Accessibility::{
 ///
 /// `None` means the property could not be read. Callers fail open in that case
 /// so a transient UIA query never blocks an otherwise valid coordinate action.
+///
+/// # Safety
+/// A nonzero `element_ptr` must point to a live `IUIAutomationElement`.
+/// The caller must keep the interface alive for every dereference in this call
+/// and ensure it is valid in the calling thread's COM apartment.
 pub unsafe fn element_is_offscreen(element_ptr: usize) -> Option<bool> {
     if element_ptr == 0 {
         return None;
@@ -126,6 +131,11 @@ pub unsafe fn scroll_into_view_and_recenter(
 /// top-level host HWND ignores `WM_VSCROLL`. Keeping this on the UIA channel
 /// makes indexed background scrolls reach that container without activating
 /// the host window.
+///
+/// # Safety
+/// A nonzero `element_ptr` must point to a live `IUIAutomationElement`.
+/// The caller must keep the interface alive for every dereference in this call
+/// and ensure it is valid in the calling thread's COM apartment.
 pub unsafe fn scroll_element(
     element_ptr: usize,
     direction: &str,
@@ -135,7 +145,7 @@ pub unsafe fn scroll_element(
         anyhow::bail!("cached UIA scroll element is null");
     }
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    let elem: IUIAutomationElement = IUIAutomationElement::from_raw(element_ptr as *mut _);
+    let elem = std::mem::ManuallyDrop::new(IUIAutomationElement::from_raw(element_ptr as *mut _));
     let pattern = elem
         .GetCurrentPattern(UIA_ScrollPatternId)
         .map_err(|e| anyhow::anyhow!("UIA ScrollPattern unavailable: {e}"))?;
@@ -158,7 +168,6 @@ pub unsafe fn scroll_element(
         };
         result.map_err(|e| anyhow::anyhow!("UIA scroll failed: {e}"))?;
     }
-    std::mem::forget(elem);
     Ok(())
 }
 

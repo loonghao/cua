@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::time::{sleep, Duration};
 
 use crate::protocol::{Content, ToolResult};
 use crate::tool::{ProtectedResourceOwnership, Tool, ToolDef, ToolRegistry};
@@ -37,6 +38,113 @@ pub fn register_browser_tools(engine: &Arc<BrowserEngine>, registry: &mut ToolRe
     registry.register(Box::new(BrowserSetInputFilesTool::new(engine.clone())));
     registry.register(Box::new(BrowserDownloadTool::new(engine.clone())));
     registry.register(Box::new(BrowserPointerTool::new(engine.clone())));
+}
+
+const FOREGROUND_READBACK_ATTEMPTS: usize = 50;
+const FOREGROUND_READBACK_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForegroundReadbackError {
+    StaleDocument,
+    Failed,
+    Timeout,
+}
+
+async fn read_activated_tab(
+    conn: &CdpConnection,
+    cdp_session: &str,
+    expected_frame_id: &str,
+    expected_loader_id: Option<&str>,
+    requested_url: &str,
+) -> Result<Value, ForegroundReadbackError> {
+    let expression = r#"JSON.stringify({current_url: location.href, title: document.title, heading: document.querySelector('h1,h2,[role=heading]')?.textContent?.trim() ?? '', visibility_state: document.visibilityState, ready_state: document.readyState})"#;
+    let mut committed_document_seen = false;
+    for attempt in 0..FOREGROUND_READBACK_ATTEMPTS {
+        let frame_tree = conn
+            .call(Some(cdp_session), "Page.getFrameTree", json!({}))
+            .await
+            .map_err(|_| ForegroundReadbackError::Failed)?;
+        let frame = &frame_tree["frameTree"]["frame"];
+        let frame_matches = frame["id"].as_str() == Some(expected_frame_id);
+        let loader_matches = expected_loader_id
+            .map(|expected| frame["loaderId"].as_str() == Some(expected))
+            .unwrap_or(true);
+        if !frame_matches || !loader_matches {
+            if attempt + 1 < FOREGROUND_READBACK_ATTEMPTS {
+                sleep(FOREGROUND_READBACK_INTERVAL).await;
+                continue;
+            }
+            return Err(ForegroundReadbackError::StaleDocument);
+        }
+        let committed_url = frame["url"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or(ForegroundReadbackError::Failed)?;
+        committed_document_seen = true;
+        let value = conn
+            .call(
+                Some(cdp_session),
+                "Runtime.evaluate",
+                json!({"expression": expression, "returnByValue": true}),
+            )
+            .await
+            .map_err(|_| ForegroundReadbackError::Failed)?;
+        let encoded = value["result"]["value"].as_str().unwrap_or_default();
+        let readback: Value =
+            serde_json::from_str(encoded).map_err(|_| ForegroundReadbackError::Failed)?;
+        let same_document_matches = readback["current_url"].as_str() == Some(committed_url)
+            && (expected_loader_id.is_some() || committed_url == requested_url);
+        let settled = matches!(
+            readback["ready_state"].as_str(),
+            Some("interactive" | "complete")
+        );
+        let exact_fields = readback["visibility_state"] == "visible"
+            && readback["current_url"].as_str().is_some()
+            && readback["title"].as_str().is_some()
+            && readback["heading"].as_str().is_some();
+        if settled && exact_fields && same_document_matches {
+            return Ok(readback);
+        }
+        if attempt + 1 < FOREGROUND_READBACK_ATTEMPTS {
+            sleep(FOREGROUND_READBACK_INTERVAL).await;
+        }
+    }
+    if committed_document_seen {
+        Err(ForegroundReadbackError::Timeout)
+    } else {
+        Err(ForegroundReadbackError::StaleDocument)
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keep the explicit target, delivery and readback receipt fields visible at each failure site"
+)]
+fn navigation_failure(
+    target_id: &str,
+    tab_id: &str,
+    url: &str,
+    delivery_mode: &str,
+    dispatched: bool,
+    activation_state: &str,
+    readback_state: &str,
+    error_code: &str,
+    message: &str,
+) -> ToolResult {
+    ToolResult::error(message).with_structured(json!({
+        "status": "error",
+        "target_id": target_id,
+        "tab_id": tab_id,
+        "url": url,
+        "delivery_mode": delivery_mode,
+        "dispatched": dispatched,
+        "activated": activation_state == "succeeded",
+        "activation_state": activation_state,
+        "readback_state": readback_state,
+        "refs_invalidated": dispatched,
+        "error_code": error_code,
+        "error": message,
+    }))
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
@@ -230,6 +338,16 @@ fn semantic_ref_value(listed: &super::engine::SemanticListedRef) -> Value {
     })
 }
 
+fn semantic_scope_anchor_value(anchor: &super::semantic::SemanticScopeAnchor) -> Value {
+    json!({
+        "requested_ref": anchor.source_ref,
+        "role": anchor.role,
+        "name": anchor.name,
+        "frame": anchor.identity.frame.kind.as_str(),
+        "distance": anchor.distance,
+    })
+}
+
 fn with_tab_screenshot(mut result: ToolResult, screenshot: BrowserTabScreenshot) -> ToolResult {
     if let Some(structured) = result.structured_content.as_mut() {
         structured["screenshot"] = json!({
@@ -296,6 +414,13 @@ impl GetBrowserStateTool {
                         "type": "string",
                         "description": "Current semantic/content ref whose subtree should be observed."
                     },
+                    "scope_ancestor_role": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                        "description": "Resolve scope_ref to its nearest strict same-frame ancestor with this exact accessibility role, then apply query inside that subtree. Requires scope_ref and query."
+                    },
                     "query": {
                         "type": "string",
                         "description": "Read-only semantic match over role, accessible name, and visible text."
@@ -310,6 +435,40 @@ impl GetBrowserStateTool {
                         "description": "Capture the exact tab viewport as PNG through CDP without selecting the tab or foregrounding its native window. The request refuses if capture cannot be completed."
                     },
                 },
+                "allOf": [
+                    {
+                        "if": {
+                            "anyOf": [
+                                { "required": ["scope_ref"] },
+                                { "required": ["scope_ancestor_role"] },
+                                { "required": ["query"] },
+                                { "required": ["continuation"] }
+                            ]
+                        },
+                        "then": {
+                            "required": ["target_id", "tab_id", "snapshot_format"],
+                            "properties": {
+                                "snapshot_format": { "const": "semantic_v2" }
+                            }
+                        }
+                    },
+                    {
+                        "if": { "required": ["scope_ancestor_role"] },
+                        "then": { "required": ["scope_ref", "query"] }
+                    },
+                    {
+                        "if": { "required": ["continuation"] },
+                        "then": {
+                            "not": {
+                                "anyOf": [
+                                    { "required": ["scope_ref"] },
+                                    { "required": ["scope_ancestor_role"] },
+                                    { "required": ["query"] }
+                                ]
+                            }
+                        }
+                    }
+                ],
                 "additionalProperties": true
             }),
             read_only: true,
@@ -354,6 +513,9 @@ impl Tool for GetBrowserStateTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
+        if args.opt_str("target_id").is_none() && args.get("scope_ancestor_role").is_some() {
+            return ToolResult::error("scope_ancestor_role is valid only in snapshot mode");
+        }
         // Snapshot mode: target_id (+ tab_id) — uses existing capabilities.
         if let Some(target_id) = args.opt_str("target_id") {
             let session = match require_explicit_session(&args) {
@@ -389,23 +551,57 @@ impl Tool for GetBrowserStateTool {
             }
             if snapshot_format == "dom_refs_v1"
                 && (args.opt_str("scope_ref").is_some()
+                    || args.get("scope_ancestor_role").is_some()
                     || args.opt_str("query").is_some()
                     || args.opt_str("continuation").is_some())
             {
                 return ToolResult::error(
-                    "scope_ref, query, and continuation require snapshot_format=\"semantic_v2\"",
+                    "scope_ref, scope_ancestor_role, query, and continuation require snapshot_format=\"semantic_v2\"",
                 );
             }
             if snapshot_format == "semantic_v2" {
+                let scope_ancestor_role = match args.get("scope_ancestor_role") {
+                    None => None,
+                    Some(Value::String(role)) => {
+                        if role.is_empty()
+                            || role.len() > 128
+                            || !role.is_ascii()
+                            || !role.as_bytes()[0].is_ascii_alphabetic()
+                            || !role.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+                            })
+                        {
+                            return ToolResult::error(
+                                "scope_ancestor_role must be an ASCII accessibility role of 1 to 128 bytes",
+                            );
+                        }
+                        Some(role.trim().to_ascii_lowercase())
+                    }
+                    Some(_) => {
+                        return ToolResult::error(
+                            "Field scope_ancestor_role has wrong type: expected string",
+                        )
+                    }
+                };
+                if scope_ancestor_role.is_some()
+                    && (args.opt_str("scope_ref").is_none() || args.opt_str("query").is_none())
+                {
+                    return ToolResult::error(
+                        "scope_ancestor_role requires both scope_ref and query",
+                    );
+                }
                 let snapshot = match self
                     .engine
                     .snapshot_tab_semantic(
                         &session,
                         &target_id,
                         &tab_id,
-                        args.opt_str("scope_ref").as_deref(),
-                        args.opt_str("query").as_deref(),
-                        args.opt_str("continuation").as_deref(),
+                        super::engine::SemanticSnapshotRequest {
+                            scope_ref: args.opt_str("scope_ref").as_deref(),
+                            scope_ancestor_role: scope_ancestor_role.as_deref(),
+                            query: args.opt_str("query").as_deref(),
+                            continuation: args.opt_str("continuation").as_deref(),
+                        },
                     )
                     .await
                 {
@@ -437,6 +633,7 @@ impl Tool for GetBrowserStateTool {
                                 "format": "semantic_v2",
                                 "complete": outcome.complete,
                                 "scope": outcome.scope,
+                                "scope_anchor": outcome.scope_anchor.as_ref().map(semantic_scope_anchor_value),
                                 "selected_nodes": outcome.selected_nodes,
                                 "total_nodes": outcome.total_nodes,
                                 "node_budget": super::semantic::DEFAULT_SEMANTIC_NODE_BUDGET,
@@ -777,6 +974,12 @@ impl BrowserNavigateTool {
                     "target_id": schema_target_id(),
                     "tab_id": schema_tab_id(),
                     "url": { "type": "string", "description": "Destination URL (http:, https:, or about:)." },
+                    "delivery_mode": {
+                        "type": "string",
+                        "enum": ["background", "foreground"],
+                        "default": "background",
+                        "description": "Background preserves the selected tab. Foreground explicitly selects this exact tab and returns live page readback."
+                    },
                     "session": schema_session(),
                 },
                 "required": ["target_id", "tab_id", "url"],
@@ -834,6 +1037,15 @@ impl Tool for BrowserNavigateTool {
             Ok(s) => s,
             Err(e) => return e,
         };
+        let delivery_mode = match args.opt_str("delivery_mode").as_deref() {
+            None | Some("background") => "background",
+            Some("foreground") => "foreground",
+            Some(other) => {
+                return ToolResult::error(format!(
+                    "browser_navigate delivery_mode must be background or foreground, got: {other}"
+                ))
+            }
+        };
         let lower = url.to_ascii_lowercase();
         if !(lower.starts_with("http://")
             || lower.starts_with("https://")
@@ -871,22 +1083,171 @@ impl Tool for BrowserNavigateTool {
             .await
         {
             Ok(result) => {
-                if let Some(err_text) = result.get("errorText").and_then(Value::as_str) {
-                    return ToolResult::error(format!("navigation failed: {err_text}"));
-                }
-                // Refs die with the old document.
+                // A delivered navigation attempt can replace the document even
+                // when Chromium reports an errorText. Fence all old refs before
+                // interpreting any post-dispatch outcome.
                 self.engine
                     .store
                     .invalidate_tab_snapshots(&session, &target_id, &tab_id);
-                ToolResult::text(format!("navigated {tab_id} to {url}")).with_structured(json!({
+                if let Some(err_text) = result.get("errorText").and_then(Value::as_str) {
+                    let _ = err_text;
+                    return navigation_failure(
+                        &target_id,
+                        &tab_id,
+                        &url,
+                        delivery_mode,
+                        true,
+                        "not_started",
+                        "not_started",
+                        "navigation_rejected",
+                        "browser navigation was rejected",
+                    );
+                }
+                let readback = if delivery_mode == "foreground" {
+                    if let Err(error) = validated
+                        .conn
+                        .call(
+                            None,
+                            "Target.activateTarget",
+                            json!({"targetId": validated.tab.cdp_target_id}),
+                        )
+                        .await
+                    {
+                        let _ = error;
+                        return navigation_failure(
+                            &target_id,
+                            &tab_id,
+                            &url,
+                            delivery_mode,
+                            true,
+                            "failed",
+                            "not_started",
+                            "target_activation_failed",
+                            "foreground target activation failed",
+                        );
+                    }
+                    let expected_frame_id = result["frameId"].as_str().unwrap_or_default();
+                    let expected_loader_id = result["loaderId"].as_str();
+                    if expected_frame_id.is_empty() {
+                        return navigation_failure(
+                            &target_id,
+                            &tab_id,
+                            &url,
+                            delivery_mode,
+                            true,
+                            "succeeded",
+                            "failed",
+                            "navigation_identity_missing",
+                            "browser navigation did not return a frame identity",
+                        );
+                    }
+                    let readback = match read_activated_tab(
+                        &validated.conn,
+                        &validated.cdp_session,
+                        expected_frame_id,
+                        expected_loader_id,
+                        &url,
+                    )
+                    .await
+                    {
+                        Ok(value) => value,
+                        Err(ForegroundReadbackError::StaleDocument) => {
+                            return navigation_failure(
+                                &target_id,
+                                &tab_id,
+                                &url,
+                                delivery_mode,
+                                true,
+                                "succeeded",
+                                "stale_document",
+                                "navigation_commit_not_observed",
+                                "foreground readback did not reach the dispatched navigation",
+                            )
+                        }
+                        Err(ForegroundReadbackError::Failed) => {
+                            return navigation_failure(
+                                &target_id,
+                                &tab_id,
+                                &url,
+                                delivery_mode,
+                                true,
+                                "succeeded",
+                                "failed",
+                                "foreground_readback_failed",
+                                "foreground browser readback failed",
+                            )
+                        }
+                        Err(ForegroundReadbackError::Timeout) => {
+                            return navigation_failure(
+                                &target_id,
+                                &tab_id,
+                                &url,
+                                delivery_mode,
+                                true,
+                                "succeeded",
+                                "timeout",
+                                "foreground_readback_timeout",
+                                "foreground browser readback timed out",
+                            )
+                        }
+                    };
+                    if self
+                        .engine
+                        .revalidate_for_mutation(&session, &target_id, Some(&tab_id))
+                        .await
+                        .is_err()
+                    {
+                        return navigation_failure(
+                            &target_id,
+                            &tab_id,
+                            &url,
+                            delivery_mode,
+                            true,
+                            "succeeded",
+                            "succeeded",
+                            "target_drift_after_navigation",
+                            "browser target identity changed after navigation",
+                        );
+                    }
+                    Some(readback)
+                } else {
+                    None
+                };
+                let mut structured = json!({
                     "status": "ok",
                     "target_id": target_id,
                     "tab_id": tab_id,
                     "url": url,
+                    "delivery_mode": delivery_mode,
+                    "dispatched": true,
+                    "activated": delivery_mode == "foreground",
+                    "activation_state": if delivery_mode == "foreground" { "succeeded" } else { "not_requested" },
+                    "readback_state": if delivery_mode == "foreground" { "succeeded" } else { "not_requested" },
                     "refs_invalidated": true,
-                }))
+                });
+                if let Some(readback) = readback {
+                    structured["current_url"] = readback["current_url"].clone();
+                    structured["title"] = readback["title"].clone();
+                    structured["heading"] = readback["heading"].clone();
+                    structured["visibility_state"] = readback["visibility_state"].clone();
+                    structured["ready_state"] = readback["ready_state"].clone();
+                }
+                ToolResult::text(format!("navigated {tab_id} to {url}")).with_structured(structured)
             }
-            Err(e) => ToolResult::error(format!("Page.navigate failed: {e}")),
+            Err(e) => {
+                let _ = e;
+                navigation_failure(
+                    &target_id,
+                    &tab_id,
+                    &url,
+                    delivery_mode,
+                    false,
+                    "not_started",
+                    "not_started",
+                    "navigation_dispatch_failed",
+                    "browser navigation dispatch failed",
+                )
+            }
         }
     }
 }
@@ -2318,7 +2679,7 @@ impl BrowserSetInputFilesTool {
         Self {
             def: ToolDef {
                 name: "browser_set_input_files".into(),
-                description: "Assign one or more explicit absolute local files to an exact live <input type=file> ref through CDP. This bypasses native file pickers, rejects symlinks and non-regular files, and never returns local paths.".into(),
+                description: "Assign one or more explicit absolute local files to an exact live <input type=file> ref, or to a visible semantic chooser explicitly and uniquely associated with one hidden file input. This bypasses native file pickers, rejects ambiguous associations, symlinks, and non-regular files, and never returns local paths.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -2442,12 +2803,15 @@ impl Tool for BrowserSetInputFilesTool {
             Ok(session) => session,
             Err(refusal) => return refusal.to_tool_result(),
         };
+        let upload_backend_node_id = entry
+            .upload_backend_node_id
+            .unwrap_or(entry.backend_node_id);
         let described = match validated
             .conn
             .call(
                 Some(&cdp_session),
                 "DOM.describeNode",
-                json!({ "backendNodeId": entry.backend_node_id }),
+                json!({ "backendNodeId": upload_backend_node_id }),
             )
             .await
         {
@@ -2485,7 +2849,7 @@ impl Tool for BrowserSetInputFilesTool {
             .call(
                 Some(&cdp_session),
                 "DOM.setFileInputFiles",
-                json!({ "backendNodeId": entry.backend_node_id, "files": files }),
+                json!({ "backendNodeId": upload_backend_node_id, "files": files }),
             )
             .await
         {
@@ -2718,6 +3082,49 @@ mod tests {
             assert!(def.open_world, "{} can affect open-world state", def.name);
         }
         assert!(BrowserDownloadTool::new(e.clone()).def().destructive);
+    }
+
+    #[test]
+    fn semantic_ancestor_scope_schema_encodes_closed_combinations() {
+        let tool = GetBrowserStateTool::new(engine());
+        let schema = &tool.def().input_schema;
+        let validator = jsonschema::validator_for(schema).expect("browser state schema compiles");
+        let ancestor = json!({
+            "target_id": "bt1",
+            "tab_id": "tab1",
+            "snapshot_format": "semantic_v2",
+            "scope_ref": "p1:0",
+            "scope_ancestor_role": "row",
+            "query": "release options"
+        });
+        assert!(validator.is_valid(&ancestor));
+        assert!(!validator.is_valid(&json!({
+            "target_id": "bt1",
+            "tab_id": "tab1",
+            "snapshot_format": "semantic_v2",
+            "scope_ref": "p1:0",
+            "scope_ancestor_role": "row"
+        })));
+        assert!(!validator.is_valid(&json!({
+            "target_id": "bt1",
+            "tab_id": "tab1",
+            "snapshot_format": "dom_refs_v1",
+            "scope_ref": "p1:0",
+            "scope_ancestor_role": "row",
+            "query": "release options"
+        })));
+        assert!(!validator.is_valid(&json!({
+            "target_id": "bt1",
+            "tab_id": "tab1",
+            "snapshot_format": "semantic_v2",
+            "continuation": "opaque",
+            "query": "release options"
+        })));
+        assert!(!validator.is_valid(&json!({
+            "pid": 42,
+            "window_id": 7,
+            "scope_ancestor_role": "row"
+        })));
     }
 
     #[test]

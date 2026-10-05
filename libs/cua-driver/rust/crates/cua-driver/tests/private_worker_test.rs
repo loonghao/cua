@@ -250,17 +250,17 @@ async fn private_worker_inherits_the_interactive_linux_display_scope() {
 async fn dropping_the_host_closes_and_terminates_the_private_worker() {
     let state = IsolatedStateRoot::new().unwrap();
     let driver = cua_driver_sdk::CuaDriver::create_private_worker(worker_options(&state)).unwrap();
-    let pid = driver.metadata().await.unwrap().pid;
+    let _pid = driver.metadata().await.unwrap().pid;
     drop(driver);
 
     #[cfg(unix)]
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while unsafe { libc::kill(pid as i32, 0) } == 0 && std::time::Instant::now() < deadline {
+        while unsafe { libc::kill(_pid as i32, 0) } == 0 && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert_ne!(
-            unsafe { libc::kill(pid as i32, 0) },
+            unsafe { libc::kill(_pid as i32, 0) },
             0,
             "private worker must not outlive its owning SDK object"
         );

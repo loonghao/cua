@@ -5633,13 +5633,11 @@ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
             "browser_prepare" => {
                 arguments.remove("_transport_session_id");
             }
-            "browser_dialog" => {
-                if arguments.contains_key("prompt_text") {
-                    arguments.insert(
-                        "prompt_text".to_owned(),
-                        Value::String("[redacted]".to_owned()),
-                    );
-                }
+            "browser_dialog" if arguments.contains_key("prompt_text") => {
+                arguments.insert(
+                    "prompt_text".to_owned(),
+                    Value::String("[redacted]".to_owned()),
+                );
             }
             "clipboard_write" => {
                 for field in ["text", "image_path", "file_path"] {

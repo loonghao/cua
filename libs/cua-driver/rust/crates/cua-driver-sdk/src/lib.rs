@@ -1856,7 +1856,7 @@ impl ToolResult {
             if !self.images.is_empty() {
                 let metadata = &raw["structuredContent"];
                 for dimension in ["screenshot_width", "screenshot_height"] {
-                    if !metadata[dimension].as_u64().is_some_and(|value| value > 0) {
+                    if metadata[dimension].as_u64().is_none_or(|value| value == 0) {
                         return Err(DriverError::Protocol {
                             reason: format!("get_window_state image omitted valid {dimension}"),
                         });
@@ -2008,6 +2008,7 @@ mod snapshot_lifecycle_tests;
 mod tests {
     mod native_windows;
     use super::*;
+    #[cfg(unix)]
     use cua_driver_contract::{ParseVisualRegionsOutput, VisualParseError};
     #[cfg(unix)]
     use std::io::{BufRead, BufReader, Write};

@@ -140,6 +140,7 @@ fn active_proxy_sessions() -> &'static Mutex<HashSet<String>> {
     ACTIVE_PROXY_SESSIONS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+#[cfg(unix)]
 fn release_active_proxy_sessions() {
     if let Some(sessions) = ACTIVE_PROXY_SESSIONS.get() {
         let mut sessions = sessions.lock().unwrap();
@@ -336,6 +337,10 @@ pub fn default_socket_path() -> String {
 /// exists, elevated/AppContainer pixel input uses an interactively launched
 /// High-IL daemon. See #1602 / the `cua-driver-uia` crate for the worker side.
 #[cfg(target_os = "windows")]
+#[expect(
+    dead_code,
+    reason = "Retain the reserved daemon-internal UIA endpoint without routing SDK clients around parent authentication"
+)]
 pub fn default_uia_pipe_path() -> String {
     if crate::bundle::is_local_installation() {
         r"\\.\pipe\cua-driver-local-uia".to_owned()

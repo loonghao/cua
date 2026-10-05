@@ -453,7 +453,7 @@ fn browser_specs() -> Vec<BrowserSpec> {
         select_browser_products(browsers, true)
     }
     #[cfg(target_os = "windows")]
-    let candidates = {
+    {
         let program_files = std::env::var_os("ProgramFiles")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
@@ -463,7 +463,7 @@ fn browser_specs() -> Vec<BrowserSpec> {
         let local_app_data = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_default();
-        return select_browser_products(
+        select_browser_products(
             [
                 (
                     "chrome",
@@ -494,8 +494,8 @@ fn browser_specs() -> Vec<BrowserSpec> {
             })
             .collect(),
             false,
-        );
-    };
+        )
+    }
 }
 
 fn allocate_loopback_port() -> u16 {
@@ -717,9 +717,9 @@ fn harness_page_visibility(port: u16, url: &str) -> String {
 fn driver_profile_root() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
-        return PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"))
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"))
             .join("CuaDriver")
-            .join("BrowserProfiles");
+            .join("BrowserProfiles")
     }
     #[cfg(target_os = "macos")]
     {

@@ -81,6 +81,7 @@ pub mod interactive_input;
 pub mod key_pacing;
 pub mod launch_guard;
 pub mod mcp_result;
+mod owned_process;
 pub mod page;
 pub mod perception_client;
 pub mod perception_tools;

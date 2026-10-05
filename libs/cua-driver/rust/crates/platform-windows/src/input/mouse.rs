@@ -166,6 +166,10 @@ fn post_click_on(hwnd: HWND, x: i32, y: i32, count: usize, button: &str) -> Resu
 /// Post a press-drag-release gesture via PostMessage.
 ///
 /// Coordinates are root-hwnd client-area relative.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the public drag API and its coordinate, timing and button parameters."
+)]
 pub fn post_drag(
     hwnd: u64,
     from_x: i32,
@@ -223,6 +227,10 @@ pub fn post_drag(
 /// under the start point and targets that HWND for the whole gesture (a drag
 /// stays within one control), with each point converted to the child's own
 /// client space. Endpoints are given in **screen** coordinates.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the public drag API and its coordinate, timing and button parameters."
+)]
 pub fn post_drag_screen(
     root: u64,
     sx_from: i32,
@@ -732,6 +740,10 @@ fn send_click_synthesized_mods_impl(
 /// `SetForegroundWindow` swap is rejected from non-UIAccess processes
 /// when foreground-lock is active; route through `cua-driver-uia.exe`
 /// for reliable operation.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Preserve the public drag API and its coordinate, timing and button parameters."
+)]
 pub fn send_drag_synthesized(
     target: u64,
     sx_from: i32,

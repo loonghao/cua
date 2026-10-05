@@ -1220,14 +1220,15 @@ impl Tool for GetWindowStateTool {
             Some(v) => v as u32,
             None => return ToolResult::error("Missing required integer field pid."),
         };
-        let hwnd =
-            match args.get("window_id").and_then(|v| v.as_u64()) {
-                Some(v) => v,
-                None => return ToolResult::error(
+        let hwnd = match args.get("window_id").and_then(|v| v.as_u64()) {
+            Some(v) => v,
+            None => {
+                return ToolResult::error(
                     "Missing required integer field window_id. Use `list_windows` to enumerate \
                  the target app's windows, or read `launch_app`'s `windows` array.",
-                ),
-            };
+                );
+            }
+        };
         // Validate window belongs to pid — Swift's hard error. The exact HWND is
         // probed through Win32 first; the desktop-wide UIA union (2 s deadline)
         // is consulted only on a miss (#4416).
@@ -1281,7 +1282,7 @@ impl Tool for GetWindowStateTool {
                 None => {
                     return ToolResult::error(
                         "max_image_dimension must be an integer between 0 and 4294967295.",
-                    )
+                    );
                 }
             },
             None => None,
@@ -1625,7 +1626,7 @@ impl Tool for GetWindowStateTool {
                                 Err(error) => {
                                     return ToolResult::error(format!(
                                         "Window capture geometry is invalid: {error}"
-                                    ))
+                                    ));
                                 }
                             };
                             match bridge.publish(
@@ -1641,7 +1642,7 @@ impl Tool for GetWindowStateTool {
                                 Err(error) => {
                                     return ToolResult::error(format!(
                                         "Window capture publication failed: {error}"
-                                    ))
+                                    ));
                                 }
                             }
                         } else {
@@ -2357,17 +2358,17 @@ impl Tool for LaunchAppTool {
                 Err(crate::launch_uwp::AppsFolderLookupError::Timeout) => {
                     return ToolResult::error(format!(
                         "App name lookup for {n:?} is temporarily unavailable: Windows did not respond to the shell:AppsFolder query within 4s. No app was launched; retry after the shell recovers, or pass an explicit path or aumid."
-                    ))
+                    ));
                 }
                 Err(crate::launch_uwp::AppsFolderLookupError::Busy) => {
                     return ToolResult::error(format!(
                         "App name lookup for {n:?} is temporarily unavailable because a prior Windows shell lookup is still running or cooling down. No app was launched; retry later, or pass an explicit path or aumid."
-                    ))
+                    ));
                 }
                 Err(crate::launch_uwp::AppsFolderLookupError::Unavailable) => {
                     return ToolResult::error(format!(
                         "App name lookup for {n:?} is unavailable because the Windows shell lookup worker failed. No app was launched; pass an explicit path or aumid."
-                    ))
+                    ));
                 }
             }
         } else {
@@ -2453,7 +2454,7 @@ impl Tool for LaunchAppTool {
                 Ok(Err(e)) => {
                     return ToolResult::error(format!(
                         "Failed to activate packaged app {aumid:?}: {e}"
-                    ))
+                    ));
                 }
                 Err(e) => return ToolResult::error(format!("Task error: {e}")),
             }
@@ -2643,7 +2644,7 @@ impl Tool for LaunchAppTool {
                     return ToolResult::error(format!(
                         "App {:?} was not found in shell:AppsFolder or by Windows PATH/association lookup: {e}",
                         name_opt.as_deref().unwrap_or("")
-                    ))
+                    ));
                 }
                 Ok(Ok(Err(e))) => return ToolResult::error(format!("Failed to launch: {e}")),
                 Ok(Err(e)) => return ToolResult::error(format!("Task error: {e}")),
@@ -2656,7 +2657,7 @@ impl Tool for LaunchAppTool {
                             .as_deref()
                             .or_else(|| urls.first().map(|s| s.as_str()))
                             .unwrap_or("")
-                    ))
+                    ));
                 }
             }
         };
@@ -2793,7 +2794,7 @@ impl Tool for LaunchAppTool {
             // with (e.g. "gimp-3.exe" → prefix "gimp" matches "gimp-3.2.exe").
             let basename_for_match = target_file_opt
                 .as_deref()
-                .and_then(|t| t.rsplit(|c: char| c == '\\' || c == '/').next())
+                .and_then(|t| t.rsplit(['\\', '/']).next())
                 .unwrap_or("")
                 .to_owned();
             // Known-slow launchers get an extended retry budget. GIMP 3.x in
@@ -2906,7 +2907,7 @@ impl Tool for LaunchAppTool {
             // pick up launcher-stub child processes.
             let stub_basename = target_file_opt
                 .as_deref()
-                .and_then(|t| t.rsplit(|c: char| c == '\\' || c == '/').next())
+                .and_then(|t| t.rsplit(['\\', '/']).next())
                 .unwrap_or("")
                 .to_owned();
             // parent_pid is the launched pid family root — used below to
@@ -3307,7 +3308,7 @@ impl Tool for ClickTool {
                 None if args.get("capture_id").is_some() => {
                     return capture_admission_refusal(anyhow::anyhow!(
                         "capture service is unavailable"
-                    ))
+                    ));
                 }
                 None => None,
             };
@@ -3457,7 +3458,7 @@ impl Tool for ClickTool {
                     None => {
                         return ToolResult::error(format!(
                             "No windows found for pid {pid}. Provide window_id."
-                        ))
+                        ));
                     }
                 }
             }
@@ -3564,7 +3565,7 @@ impl Tool for ClickTool {
                             return ToolResult::error(format!(
                                 "MSAA element [{idx}] not in cache for hwnd={hwnd}. \
                              Call get_window_state first."
-                            ))
+                            ));
                         }
                     }
                 };
@@ -3620,7 +3621,7 @@ impl Tool for ClickTool {
                 None => {
                     return ToolResult::error(format!(
                         "Element {idx} not in cache for hwnd={hwnd}. Call get_window_state first."
-                    ))
+                    ));
                 }
             };
             // NB: the off-screen guard is applied per-delivery-path below (the
@@ -3681,7 +3682,6 @@ impl Tool for ClickTool {
                             crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || unsafe {
                                 pattern.Expand()
                             });
-                        std::mem::forget(element);
                         result.map_err(|error| {
                             anyhow::anyhow!("ExpandCollapse.Expand failed: {error}")
                         })
@@ -4001,8 +4001,12 @@ impl Tool for ClickTool {
             match sent {
                 Ok(Ok(())) => {
                     let (message, transport) = if inject {
-                        (format!("✅ Injected click on [{idx}] (screen ({x},{y}), background, no foreground swap)."),
-                            ActionTransport::WindowsTargetedInjection)
+                        (
+                            format!(
+                                "✅ Injected click on [{idx}] (screen ({x},{y}), background, no foreground swap)."
+                            ),
+                            ActionTransport::WindowsTargetedInjection,
+                        )
                     } else {
                         (
                             format!("✅ Performed {action_name} on [{idx}] (screen ({x},{y}))."),
@@ -4620,7 +4624,7 @@ impl Tool for TypeTextTool {
                     None => {
                         return ToolResult::error(format!(
                             "No windows found for pid {pid}. Provide window_id."
-                        ))
+                        ));
                     }
                 }
             }
@@ -4686,14 +4690,14 @@ impl Tool for TypeTextTool {
                     Some(center) => center,
                     None => {
                         return ToolResult::error(format!(
-                        "Element {idx} not in cache for hwnd={hwnd}. Call get_window_state first."
-                    ))
+                            "Element {idx} not in cache for hwnd={hwnd}. Call get_window_state first."
+                        ));
                     }
                 };
                 let (cx, cy) = match resolve_onscreen_point_with_scroll(
                     &admitted,
                     hwnd,
-                    idx as usize,
+                    idx,
                     cx,
                     cy,
                     "foreground typing",
@@ -4701,7 +4705,7 @@ impl Tool for TypeTextTool {
                     Ok(point) => point,
                     Err(result) => return result,
                 };
-                Some((idx as usize, (cx, cy)))
+                Some((idx, (cx, cy)))
             } else {
                 None
             };
@@ -4922,7 +4926,7 @@ impl Tool for TypeTextTool {
         // can't confirm (conservative: under-claim rather than false-succeed).
         let text_for_post = text.clone();
         let verify_pid = pid;
-        let verify_idx = elem_idx.map(|i| i as usize);
+        let verify_idx = elem_idx;
         let result = tokio::task::spawn_blocking({
             let admitted = admitted.clone();
             move || {
@@ -5302,7 +5306,7 @@ impl Tool for PressKeyTool {
                     None => {
                         return ToolResult::error(format!(
                             "No windows found for pid {pid}. Provide window_id."
-                        ))
+                        ));
                     }
                 }
             }
@@ -5355,7 +5359,7 @@ impl Tool for PressKeyTool {
             let (cx, cy) = match resolve_onscreen_point_with_scroll(
                 &admitted,
                 hwnd,
-                idx as usize,
+                idx,
                 cx,
                 cy,
                 "focusing for key delivery",
@@ -5419,7 +5423,7 @@ impl Tool for PressKeyTool {
         if !px_focus && delivery == DeliveryMode::Foreground {
             let focus_target = elem_idx.map(|idx| {
                 let point = admitted.as_ref().map(|element| element.center);
-                (idx as usize, point)
+                (idx, point)
             });
             let send_result = tokio::task::spawn_blocking({
                 let admitted = admitted.clone();
@@ -5440,7 +5444,7 @@ impl Tool for PressKeyTool {
                     "✅ Sent {key_display} via SendInput on pid {raw_pid} (delivery_mode:foreground)."
                 )),
                 Ok(Err(e)) => ToolResult::error(e.to_string()),
-                Err(e)     => ToolResult::error(format!("Task error: {e}")),
+                Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
         }
         let result = tokio::task::spawn_blocking({
@@ -5663,7 +5667,7 @@ impl Tool for HotkeyTool {
                     None => {
                         return ToolResult::error(format!(
                             "No windows found for pid {pid}. Provide window_id."
-                        ))
+                        ));
                     }
                 }
             }
@@ -5983,7 +5987,6 @@ impl Tool for SetValueTool {
                                 vp.SetValue(&BSTR::from(value.as_str()))
                             });
                         if set.is_ok() {
-                            std::mem::forget(elem);
                             return Ok("ValuePattern".to_string());
                         }
                     }
@@ -6006,11 +6009,9 @@ impl Tool for SetValueTool {
                         crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || unsafe {
                             rv.SetValue(parsed)
                         })?;
-                        std::mem::forget(elem);
                         return Ok("RangeValuePattern".to_string());
                     }
                 }
-                std::mem::forget(elem);
                 anyhow::bail!(
                     "set_value: element [{idx}] does not implement ValuePattern or \
                  RangeValuePattern. For controls with TogglePattern (CheckBox) or \
@@ -6123,7 +6124,7 @@ impl Tool for ScrollTool {
                     "✅ Scrolled {dir_disp} via SendInput wheel ({amount} tick(s)) at screen ({sx},{sy}) (desktop scope)."
                 )),
                 Ok(Err(e)) => ToolResult::error(e.to_string()),
-                Err(e)     => ToolResult::error(format!("Task error: {e}")),
+                Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
         }
 
@@ -6168,7 +6169,7 @@ impl Tool for ScrollTool {
                     None => {
                         return ToolResult::error(format!(
                             "No windows found for pid {pid}. Provide window_id."
-                        ))
+                        ));
                     }
                 }
             }
@@ -6297,7 +6298,7 @@ impl Tool for ScrollTool {
                 other => {
                     return ToolResult::error(format!(
                         "scroll: unknown direction \"{other}\" — expected up, down, left, right."
-                    ))
+                    ));
                 }
             };
             let per: i32 = if by == "page" { 3 } else { 1 };
@@ -6334,7 +6335,7 @@ impl Tool for ScrollTool {
                         "scroll: could not resolve on-screen bounds for window {hwnd:#x} \
                      (pid {pid}) to target the wheel. The window may be minimized or \
                      off-screen — call bring_to_front first."
-                    ))
+                    ));
                 }
             };
             let dir_disp = direction.clone();
@@ -6689,7 +6690,7 @@ impl Tool for DoubleClickTool {
                     None => {
                         return ToolResult::error(format!(
                             "No windows found for pid {pid}. Provide window_id."
-                        ))
+                        ));
                     }
                 }
             }
@@ -6701,7 +6702,7 @@ impl Tool for DoubleClickTool {
                 None => {
                     return ToolResult::error(format!(
                         "Element {idx} not in cache for hwnd={hwnd}. Call get_window_state first."
-                    ))
+                    ));
                 }
             };
             let recorded_center = (cx, cy);
@@ -6940,7 +6941,8 @@ impl Tool for DoubleClickTool {
                 Ok(Ok(())) => {
                     // Match Swift's pixel-path text 1:1.
                     ToolResult::text(format!(
-                        "✅ Posted double-click to pid {pid} at window-pixel ({xi}, {yi}) → screen-point ({sx_i}, {sy_i})."))
+                        "✅ Posted double-click to pid {pid} at window-pixel ({xi}, {yi}) → screen-point ({sx_i}, {sy_i})."
+                    ))
                 }
                 Ok(Err(e)) => ToolResult::error(e.to_string()),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
@@ -7047,7 +7049,7 @@ impl Tool for RightClickTool {
                     None => {
                         return ToolResult::error(format!(
                             "No windows found for pid {pid}. Provide window_id."
-                        ))
+                        ));
                     }
                 }
             }
@@ -7059,7 +7061,7 @@ impl Tool for RightClickTool {
                 None => {
                     return ToolResult::error(format!(
                         "Element {idx} not in cache for hwnd={hwnd}. Call get_window_state first."
-                    ))
+                    ));
                 }
             };
             let recorded_center = (cx, cy);
@@ -7289,7 +7291,8 @@ impl Tool for RightClickTool {
                 Ok(Ok(())) => {
                     // Swift pixel-path text 1:1.
                     ToolResult::text(format!(
-                        "✅ Posted right-click to pid {pid} at window-pixel ({xi}, {yi}) → screen-point ({sx_i}, {sy_i})."))
+                        "✅ Posted right-click to pid {pid} at window-pixel ({xi}, {yi}) → screen-point ({sx_i}, {sy_i})."
+                    ))
                 }
                 Ok(Err(e)) => ToolResult::error(e.to_string()),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
@@ -7371,7 +7374,7 @@ impl Tool for DragTool {
                     to_y,
                     duration_ms,
                     steps,
-                    &button,
+                    button,
                 )
             });
             let visual_drag = track_overlay_drag(
@@ -7418,7 +7421,7 @@ impl Tool for DragTool {
                 _ => {
                     return ToolResult::error(
                         "from_x, from_y, to_x, and to_y are all required (window-local pixels).",
-                    )
+                    );
                 }
             };
 
@@ -7463,7 +7466,7 @@ impl Tool for DragTool {
                     None => {
                         return ToolResult::error(format!(
                             "No windows found for pid {pid}. Provide window_id."
-                        ))
+                        ));
                     }
                 }
             }
@@ -7867,7 +7870,7 @@ impl Tool for GetDesktopStateTool {
                 Err(error) => {
                     return ToolResult::error(format!(
                         "Desktop capture geometry is invalid: {error}"
-                    ))
+                    ));
                 }
             };
             match bridge.publish(
@@ -7881,7 +7884,7 @@ impl Tool for GetDesktopStateTool {
                 Err(error) => {
                     return ToolResult::error(format!(
                         "Desktop capture publication failed: {error}"
-                    ))
+                    ));
                 }
             }
         }
@@ -8408,7 +8411,7 @@ if ($null -ne $rid) {{ Write-Output ([int]$rid) }}
 "#,
         pid = pid
     );
-    let out = std::process::Command::new("powershell.exe")
+    let out = crate::subprocess::std_hidden("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -8546,31 +8549,54 @@ impl Tool for SetConfigTool {
                 "capture_mode" => match val.as_str() {
                     Some(s) => {
                         cfg.capture_mode = s.to_owned();
-                        if let Err(e) = pip_preview::write_config_key("capture_mode", Value::String(s.to_owned())) {
+                        if let Err(e) = pip_preview::write_config_key(
+                            "capture_mode",
+                            Value::String(s.to_owned()),
+                        ) {
                             tracing::warn!("set_config: failed to persist capture_mode: {e}");
                         }
                         applied = true;
                     }
-                    None    => return ToolResult::error(format!("`capture_mode` must be a string, got {val}.")),
+                    None => {
+                        return ToolResult::error(format!(
+                            "`capture_mode` must be a string, got {val}."
+                        ));
+                    }
                 },
                 "max_image_dimension" => match val.as_u64() {
                     Some(n) => {
                         cfg.max_image_dimension = n as u32;
-                        if let Err(e) = pip_preview::write_config_key("max_image_dimension", Value::from(n)) {
-                            tracing::warn!("set_config: failed to persist max_image_dimension: {e}");
+                        if let Err(e) =
+                            pip_preview::write_config_key("max_image_dimension", Value::from(n))
+                        {
+                            tracing::warn!(
+                                "set_config: failed to persist max_image_dimension: {e}"
+                            );
                         }
                         applied = true;
                     }
-                    None    => return ToolResult::error(format!("`max_image_dimension` must be an integer, got {val}.")),
+                    None => {
+                        return ToolResult::error(format!(
+                            "`max_image_dimension` must be an integer, got {val}."
+                        ));
+                    }
                 },
                 "experimental_pip" => match val.as_bool() {
                     Some(b) => {
-                        if let Err(e) = pip_preview::write_config_key("experimental_pip", Value::Bool(b)) {
-                            return ToolResult::error(format!("failed to persist experimental_pip: {e}"));
+                        if let Err(e) =
+                            pip_preview::write_config_key("experimental_pip", Value::Bool(b))
+                        {
+                            return ToolResult::error(format!(
+                                "failed to persist experimental_pip: {e}"
+                            ));
                         }
                         applied = true;
                     }
-                    None => return ToolResult::error(format!("`experimental_pip` must be a boolean, got {val}.")),
+                    None => {
+                        return ToolResult::error(format!(
+                            "`experimental_pip` must be a boolean, got {val}."
+                        ));
+                    }
                 },
                 "experimental_pip_geometry" => match val.as_str() {
                     Some(s) => {
@@ -8579,16 +8605,27 @@ impl Tool for SetConfigTool {
                                 "experimental_pip_geometry `{s}` is not a valid WxH or WxH+X+Y string"
                             ));
                         }
-                        if let Err(e) = pip_preview::write_config_key("experimental_pip_geometry", Value::String(s.to_owned())) {
-                            return ToolResult::error(format!("failed to persist experimental_pip_geometry: {e}"));
+                        if let Err(e) = pip_preview::write_config_key(
+                            "experimental_pip_geometry",
+                            Value::String(s.to_owned()),
+                        ) {
+                            return ToolResult::error(format!(
+                                "failed to persist experimental_pip_geometry: {e}"
+                            ));
                         }
                         applied = true;
                     }
-                    None => return ToolResult::error(format!("`experimental_pip_geometry` must be a string, got {val}.")),
+                    None => {
+                        return ToolResult::error(format!(
+                            "`experimental_pip_geometry` must be a string, got {val}."
+                        ));
+                    }
                 },
-                other => return ToolResult::error(format!(
-                    "Unknown config key `{other}`. Known: capture_mode, max_image_dimension, experimental_pip, experimental_pip_geometry."
-                )),
+                other => {
+                    return ToolResult::error(format!(
+                        "Unknown config key `{other}`. Known: capture_mode, max_image_dimension, experimental_pip, experimental_pip_geometry."
+                    ));
+                }
             }
         }
         // Legacy per-field shape.
@@ -8936,7 +8973,7 @@ impl Tool for TypeTextCharsTool {
                     None => {
                         return ToolResult::error(format!(
                             "No windows found for pid {pid}. Provide window_id."
-                        ))
+                        ));
                     }
                 }
             }
@@ -9417,7 +9454,7 @@ impl Tool for BringToFrontTool {
                     None => {
                         return ToolResult::error(format!(
                             "bring_to_front: no windows found for pid {pid}. Provide window_id."
-                        ))
+                        ));
                     }
                 }
             }
@@ -9514,7 +9551,9 @@ impl Tool for BringToFrontTool {
             Ok(Ok((prev, now, raised, restored))) => {
                 let focused = now == hwnd;
                 let msg = if focused {
-                    format!("✅ bring_to_front: pid {pid} hwnd 0x{hwnd:x} is now foreground (was 0x{prev:x}).")
+                    format!(
+                        "✅ bring_to_front: pid {pid} hwnd 0x{hwnd:x} is now foreground (was 0x{prev:x})."
+                    )
                 } else if raised {
                     format!(
                         "bring_to_front: exact target hwnd 0x{hwnd:x} was raised in z-order, but \
@@ -9632,12 +9671,12 @@ impl Tool for KillAppTool {
         let pid_v: u32 = match args.get("pid").and_then(|v| v.as_u64()) {
             Some(p) if p > 0 && p <= u32::MAX as u64 => p as u32,
             Some(_) => {
-                return ToolResult::error("kill_app: `pid` must be a positive integer".to_string())
+                return ToolResult::error("kill_app: `pid` must be a positive integer".to_string());
             }
             None => {
                 return ToolResult::error(
                     "kill_app: missing required integer field `pid`".to_string(),
-                )
+                );
             }
         };
 
@@ -9752,7 +9791,9 @@ impl Tool for DebugWindowInfoTool {
         let pid_v: u32 = match args.get("pid").and_then(|v| v.as_u64()) {
             Some(p) if p > 0 && p <= u32::MAX as u64 => p as u32,
             _ => {
-                return ToolResult::error("debug_window_info: missing or invalid `pid`".to_string())
+                return ToolResult::error(
+                    "debug_window_info: missing or invalid `pid`".to_string(),
+                );
             }
         };
 
@@ -9810,7 +9851,7 @@ impl Tool for DebugWindowInfoTool {
                         if ok.is_ok() && len > 0 {
                             let path = String::from_utf16_lossy(&buf[..len as usize]);
                             let base = path
-                                .rsplit(|c: char| c == '\\' || c == '/')
+                                .rsplit(['\\', '/'])
                                 .next()
                                 .unwrap_or(&path)
                                 .to_ascii_lowercase();
@@ -9966,10 +10007,6 @@ impl Tool for DebugWindowInfoTool {
 }
 
 // ── registry builder ──────────────────────────────────────────────────────────
-
-pub fn build_registry(compat: bool) -> ToolRegistry {
-    build_registry_with_provider(compat, None)
-}
 
 pub fn build_registry_with_provider(
     compat: bool,

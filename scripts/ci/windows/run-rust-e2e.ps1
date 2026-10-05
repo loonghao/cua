@@ -397,6 +397,16 @@ if ($suite -in @("shared", "all")) {
 }
 
 if ($suite -in @("native", "all")) {
+    Invoke-CargoTest "Owned console child visibility and lifecycle" @(
+        "test", "-p", "cua-driver-core", "--lib", "--",
+        "--ignored", "--exact", "owned_process::tests::every_owned_console_child_role_is_hidden_and_preserves_pipes_and_lifecycle",
+        "--nocapture", "--test-threads=1"
+    )
+    Invoke-CargoTest "Windows diagnostic helper visibility" @(
+        "test", "-p", "platform-windows", "--lib", "--",
+        "--ignored", "--exact", "subprocess::tests::hidden_helper_has_no_visible_console_window",
+        "--nocapture", "--test-threads=1"
+    )
     Invoke-CargoTest "Windows installed-app discovery deadline" @(
         "test", "-p", "cua-driver", "--test", "protocol_tools_call_test", "--",
         "--ignored", "--exact", "tools_call_list_apps", "--nocapture", "--test-threads=1"
