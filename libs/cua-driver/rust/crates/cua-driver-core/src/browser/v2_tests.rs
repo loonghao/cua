@@ -2586,21 +2586,20 @@ async fn semantic_ancestor_scope_schema_and_combinations_fail_closed() {
         128
     );
 
-    let missing_ref = tool
-        .invoke(json!({
-            "target_id": target,
-            "tab_id": tab,
-            "session": SESSION,
-            "snapshot_format": "semantic_v2",
-            "scope_ancestor_role": "row",
-            "query": "Options"
-        }))
-        .await;
-    assert_eq!(missing_ref.is_error, Some(true));
-    assert!(missing_ref.content.iter().any(|content| matches!(
-        content,
-        Content::Text { text, .. } if text.contains("requires both scope_ref and query")
-    )));
+    for missing in ["scope_ref", "query"] {
+        let mut args = json!({
+            "target_id": target, "tab_id": tab, "session": SESSION,
+            "snapshot_format": "semantic_v2", "scope_ancestor_role": "row",
+            "scope_ref": "p1:0", "query": "Options"
+        });
+        args.as_object_mut().unwrap().remove(missing);
+        let result = tool.invoke(args).await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(result.content.iter().any(|content| matches!(
+            content,
+            Content::Text { text, .. } if text == "scope_ancestor_role requires both scope_ref and query"
+        )), "missing {missing}: {result:?}");
+    }
 
     let legacy = tool
         .invoke(json!({

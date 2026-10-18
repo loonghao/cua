@@ -433,7 +433,7 @@ impl GetBrowserStateTool {
                     },
                     "scope_ref": {
                         "type": "string",
-                        "description": "Current semantic/content ref whose subtree should be observed."
+                        "description": "Current semantic/content ref whose subtree should be observed. Requires target_id, tab_id and snapshot_format=semantic_v2; cannot be combined with continuation."
                     },
                     "scope_ancestor_role": {
                         "type": "string",
@@ -444,11 +444,11 @@ impl GetBrowserStateTool {
                     },
                     "query": {
                         "type": "string",
-                        "description": "Read-only semantic match over role, accessible name, and visible text."
+                        "description": "Read-only semantic match over role, accessible name, and visible text. Requires target_id, tab_id and snapshot_format=semantic_v2; cannot be combined with continuation."
                     },
                     "continuation": {
                         "type": "string",
-                        "description": "Opaque continuation minted by an earlier semantic_v2 response."
+                        "description": "Opaque continuation minted by an earlier semantic_v2 response. Requires target_id, tab_id and snapshot_format=semantic_v2; cannot be combined with scope_ref, scope_ancestor_role or query."
                     },
                     "include_screenshot": {
                         "type": "boolean",
@@ -456,40 +456,6 @@ impl GetBrowserStateTool {
                         "description": "Capture the exact tab viewport as PNG through CDP without selecting the tab or foregrounding its native window. The request refuses if capture cannot be completed."
                     },
                 },
-                "allOf": [
-                    {
-                        "if": {
-                            "anyOf": [
-                                { "required": ["scope_ref"] },
-                                { "required": ["scope_ancestor_role"] },
-                                { "required": ["query"] },
-                                { "required": ["continuation"] }
-                            ]
-                        },
-                        "then": {
-                            "required": ["target_id", "tab_id", "snapshot_format"],
-                            "properties": {
-                                "snapshot_format": { "const": "semantic_v2" }
-                            }
-                        }
-                    },
-                    {
-                        "if": { "required": ["scope_ancestor_role"] },
-                        "then": { "required": ["scope_ref", "query"] }
-                    },
-                    {
-                        "if": { "required": ["continuation"] },
-                        "then": {
-                            "not": {
-                                "anyOf": [
-                                    { "required": ["scope_ref"] },
-                                    { "required": ["scope_ancestor_role"] },
-                                    { "required": ["query"] }
-                                ]
-                            }
-                        }
-                    }
-                ],
                 "additionalProperties": true
             }),
             read_only: true,
@@ -3380,46 +3346,32 @@ mod tests {
     }
 
     #[test]
-    fn semantic_ancestor_scope_schema_encodes_closed_combinations() {
+    fn semantic_ancestor_scope_schema_is_provider_compatible() {
         let tool = GetBrowserStateTool::new(engine());
         let schema = &tool.def().input_schema;
+        // Runtime combination checks live in the v2 invocation tests. Provider
+        // schemas cannot express them with top-level allOf/if/then keywords.
+        for keyword in ["allOf", "anyOf", "oneOf", "if", "then", "not"] {
+            assert!(schema.get(keyword).is_none(), "{keyword}");
+        }
         let validator = jsonschema::validator_for(schema).expect("browser state schema compiles");
         let ancestor = json!({
-            "target_id": "bt1",
-            "tab_id": "tab1",
-            "snapshot_format": "semantic_v2",
-            "scope_ref": "p1:0",
-            "scope_ancestor_role": "row",
-            "query": "release options"
+            "target_id": "bt1", "tab_id": "tab1", "snapshot_format": "semantic_v2",
+            "scope_ref": "p1:0", "scope_ancestor_role": "row", "query": "release options"
         });
         assert!(validator.is_valid(&ancestor));
-        assert!(!validator.is_valid(&json!({
-            "target_id": "bt1",
-            "tab_id": "tab1",
-            "snapshot_format": "semantic_v2",
-            "scope_ref": "p1:0",
-            "scope_ancestor_role": "row"
-        })));
-        assert!(!validator.is_valid(&json!({
-            "target_id": "bt1",
-            "tab_id": "tab1",
-            "snapshot_format": "dom_refs_v1",
-            "scope_ref": "p1:0",
-            "scope_ancestor_role": "row",
-            "query": "release options"
-        })));
-        assert!(!validator.is_valid(&json!({
-            "target_id": "bt1",
-            "tab_id": "tab1",
-            "snapshot_format": "semantic_v2",
-            "continuation": "opaque",
-            "query": "release options"
-        })));
-        assert!(!validator.is_valid(&json!({
-            "pid": 42,
-            "window_id": 7,
-            "scope_ancestor_role": "row"
-        })));
+        for role in [
+            json!(""),
+            json!(" row"),
+            json!("row "),
+            json!("x".repeat(129)),
+            json!(42),
+            Value::Null,
+        ] {
+            let mut invalid = ancestor.clone();
+            invalid["scope_ancestor_role"] = role;
+            assert!(!validator.is_valid(&invalid), "{invalid}");
+        }
     }
 
     #[test]

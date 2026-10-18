@@ -75,6 +75,31 @@ candidate. Their branches, PR states, and the separate attribution-policy PR
 are unchanged. Prior source-lint moves and CI staging changes are not replayed
 when the official 0.36 source already satisfies the current gate.
 
+## Migration regression corrections
+
+- Generic AX traversal uses renderer-target identity, so same-process iframe
+  children remain in direct scopes and outlines while OOPIF id collisions stay
+  isolated. Ancestor capability validation still requires exact frame/document
+  proof. This distinction also appears in [upstream PR #5387](https://github.com/trycua/cua/pull/5387); that work is
+  already owned upstream and is not duplicated here.
+- Upload associations stop at a shadow/document host boundary without dropping
+  an already proven local association. Implicit labels containing competing
+  labelable controls refuse upload rather than selecting an unrelated file
+  input. Hidden-type inputs are not labelable; CSS-hidden file inputs are.
+- Provider-facing browser schemas stay flat for Bedrock/Vertex compatibility.
+  Invocation still enforces ancestor scope/ref/query requirements and semantic
+  continuation conflicts; removing unsupported advertised `allOf` does not
+  remove those runtime checks. Legacy bind-mode handling of non-ancestor
+  optional fields is unchanged.
+  The live protocol roster includes explicit foreground browser navigation.
+
+Three actual semantic owner tests failed before the boundary corrections and
+passed afterward, and the existing schema/runtime test failed on `allOf`
+before the provider correction. The source-built CLI direct-MCP protocol
+schema test passes with the flat schema and navigation roster. Browser tests
+are CPU and mock-CDP results, not live browser or native Windows/macOS
+acceptance.
+
 ## Qualification boundaries
 
 The Windows matcher source can be tested without Win32, but that does not

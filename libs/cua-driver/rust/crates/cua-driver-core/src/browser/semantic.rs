@@ -143,9 +143,9 @@ impl SemanticNode {
     }
 }
 
-/// One semantic node's identity inside a composed snapshot. AX node ids and
-/// backend node ids are only unique within their owning frame/document, so a
-/// scope key must retain the complete frame proof.
+/// A scoped capability retains its complete frame/document proof. Generic AX
+/// traversal uses a separate renderer-target key: same-process iframe AX
+/// parent/child links can legitimately cross document boundaries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SemanticNodeIdentity {
     pub(crate) ax_id: String,
@@ -211,16 +211,39 @@ struct SemanticBackendIdentity {
     frame: FrameRef,
 }
 
+/// AX ids share a namespace within one renderer target, including same-process
+/// iframes, but may be reused by independently collected OOPIF targets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SemanticRendererIdentity {
+    ax_id: String,
+    oopif_target_id: Option<String>,
+}
+
+impl SemanticRendererIdentity {
+    fn new(frame: &FrameRef, ax_id: &str) -> Self {
+        Self {
+            ax_id: ax_id.to_owned(),
+            oopif_target_id: frame.oopif_target_id.clone(),
+        }
+    }
+}
+
 struct SemanticTreeIndex {
     by_identity: HashMap<SemanticNodeIdentity, Vec<usize>>,
+    by_renderer: HashMap<SemanticRendererIdentity, Vec<usize>>,
     by_backend: HashMap<SemanticBackendIdentity, Vec<usize>>,
 }
 
 impl SemanticTreeIndex {
     fn new(nodes: &[SemanticNode]) -> Self {
         let mut by_identity = HashMap::<SemanticNodeIdentity, Vec<usize>>::new();
+        let mut by_renderer = HashMap::<SemanticRendererIdentity, Vec<usize>>::new();
         let mut by_backend = HashMap::<SemanticBackendIdentity, Vec<usize>>::new();
         for (idx, node) in nodes.iter().enumerate() {
+            by_renderer
+                .entry(SemanticRendererIdentity::new(&node.frame, &node.ax_id))
+                .or_default()
+                .push(idx);
             by_identity
                 .entry(SemanticNodeIdentity {
                     ax_id: node.ax_id.clone(),
@@ -240,8 +263,16 @@ impl SemanticTreeIndex {
         }
         Self {
             by_identity,
+            by_renderer,
             by_backend,
         }
+    }
+
+    fn renderer_nodes_for(&self, frame: &FrameRef, ax_id: &str) -> &[usize] {
+        self.by_renderer
+            .get(&SemanticRendererIdentity::new(frame, ax_id))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     fn nodes_for(&self, identity: &SemanticNodeIdentity) -> &[usize] {
@@ -264,6 +295,7 @@ impl SemanticTreeIndex {
 
 struct SemanticAncestryIndex {
     by_identity: HashMap<SemanticNodeIdentity, Vec<usize>>,
+    by_renderer: HashMap<SemanticRendererIdentity, Vec<usize>>,
     by_parent: HashMap<SemanticNodeIdentity, Vec<usize>>,
     by_ax_id: HashMap<String, Vec<usize>>,
 }
@@ -271,9 +303,14 @@ struct SemanticAncestryIndex {
 impl SemanticAncestryIndex {
     fn new(nodes: &[SemanticAncestryNode]) -> Self {
         let mut by_identity = HashMap::<SemanticNodeIdentity, Vec<usize>>::new();
+        let mut by_renderer = HashMap::<SemanticRendererIdentity, Vec<usize>>::new();
         let mut by_parent = HashMap::<SemanticNodeIdentity, Vec<usize>>::new();
         let mut by_ax_id = HashMap::<String, Vec<usize>>::new();
         for (idx, node) in nodes.iter().enumerate() {
+            by_renderer
+                .entry(SemanticRendererIdentity::new(&node.frame, &node.ax_id))
+                .or_default()
+                .push(idx);
             by_identity
                 .entry(SemanticNodeIdentity {
                     ax_id: node.ax_id.clone(),
@@ -294,9 +331,17 @@ impl SemanticAncestryIndex {
         }
         Self {
             by_identity,
+            by_renderer,
             by_parent,
             by_ax_id,
         }
+    }
+
+    fn renderer_nodes_for(&self, frame: &FrameRef, ax_id: &str) -> &[usize] {
+        self.by_renderer
+            .get(&SemanticRendererIdentity::new(frame, ax_id))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     fn nodes_for(&self, identity: &SemanticNodeIdentity) -> &[usize] {
@@ -364,12 +409,12 @@ impl SemanticAncestryIndex {
                 if !declared.insert(child_ax_id.as_str()) {
                     continue;
                 }
+                let [child_idx] = self.renderer_nodes_for(&current.frame, child_ax_id) else {
+                    continue;
+                };
                 let child_identity = SemanticNodeIdentity {
                     ax_id: child_ax_id.clone(),
-                    frame: current.frame.clone(),
-                };
-                let [child_idx] = self.nodes_for(&child_identity) else {
-                    continue;
+                    frame: nodes[*child_idx].frame.clone(),
                 };
                 if nodes[*child_idx].parent_ax_id.as_deref() == Some(current.ax_id.as_str())
                     && allowed.insert(child_identity.clone())
@@ -783,7 +828,9 @@ impl DomIndex {
         while let Some(backend) = current.filter(|backend| visited.insert(*backend)) {
             let meta = self.nodes.get(&backend)?;
             if meta.frame_id != source_meta.frame_id || meta.tree_scope != source_meta.tree_scope {
-                return None;
+                // Stop at the host boundary without discarding an association
+                // already proven inside this document or shadow tree.
+                break;
             }
             if meta.tag == "label" {
                 if let Some(id) = meta.attrs.get("for").filter(|id| !id.trim().is_empty()) {
@@ -792,12 +839,24 @@ impl DomIndex {
                         candidates.extend(id_target(id).ok()?);
                     }
                 } else {
-                    for (&candidate_backend, candidate) in &self.nodes {
-                        if is_file_input(candidate)
-                            && self.is_ancestor_of(backend, candidate_backend)
-                        {
+                    // HTML labels bind a labelable descendant, not whichever
+                    // file input happens to be nearby. Keep the conservative
+                    // single-control contract even for malformed labels.
+                    let controls = self.nodes.iter().filter(|(candidate_backend, candidate)| {
+                        same_scope(candidate)
+                            && self.is_ancestor_of(backend, **candidate_backend)
+                            && (matches!(candidate.tag.as_str(), "button" | "meter" | "output" | "progress" | "select" | "textarea")
+                                || (candidate.tag == "input" && !candidate.attrs.get("type").is_some_and(|kind| kind.eq_ignore_ascii_case("hidden")))
+                                // DOM metadata cannot prove whether a custom
+                                // element is form-associated; refuse ambiguity.
+                                || candidate.tag.contains('-'))
+                    }).collect::<Vec<_>>();
+                    if let [(&candidate_backend, candidate)] = controls.as_slice() {
+                        if is_file_input(candidate) {
                             candidates.insert(candidate_backend);
                         }
+                    } else if !controls.is_empty() {
+                        return None;
                     }
                 }
             }
@@ -1657,11 +1716,7 @@ fn scoped_indices(
                     frame: node.frame.clone(),
                 });
                 for child_ax_id in &node.child_ax_ids {
-                    let child_identity = SemanticNodeIdentity {
-                        ax_id: child_ax_id.clone(),
-                        frame: node.frame.clone(),
-                    };
-                    if let [child_idx] = tree.nodes_for(&child_identity) {
+                    if let [child_idx] = tree.renderer_nodes_for(&node.frame, child_ax_id) {
                         stack.push(*child_idx);
                     }
                 }
@@ -1796,18 +1851,16 @@ fn with_ancestors(
         let mut parent = nodes[*idx].parent_ax_id.as_deref();
         let mut visited = HashSet::new();
         while let Some(parent_id) = parent {
-            let identity = SemanticNodeIdentity {
-                ax_id: parent_id.to_owned(),
-                frame: frame.clone(),
-            };
-            let [parent_idx] = tree.nodes_for(&identity) else {
+            let [parent_idx] = tree.renderer_nodes_for(&frame, parent_id) else {
                 break;
             };
             if !visited.insert(*parent_idx) {
                 break;
             }
             keep.insert(*parent_idx);
-            if scope_identity == Some(&identity) {
+            if scope_identity.is_some_and(|scope| {
+                scope.ax_id == nodes[*parent_idx].ax_id && scope.frame == nodes[*parent_idx].frame
+            }) {
                 break;
             }
             parent = nodes[*parent_idx].parent_ax_id.as_deref();
@@ -1834,11 +1887,7 @@ fn render_outline(
         let mut parent = node.parent_ax_id.as_deref();
         let mut visited = HashSet::new();
         while let Some(parent_id) = parent {
-            let identity = SemanticNodeIdentity {
-                ax_id: parent_id.to_owned(),
-                frame: frame.clone(),
-            };
-            let [parent_idx] = tree.nodes_for(&identity) else {
+            let [parent_idx] = tree.renderer_nodes_for(&frame, parent_id) else {
                 break;
             };
             if !visited.insert(*parent_idx) {
@@ -2056,6 +2105,95 @@ mod tests {
         }
     }
 
+    #[test]
+    fn upload_associations_survive_their_shadow_and_iframe_boundaries() {
+        for boundary in ["shadow", "iframe"] {
+            for association in ["label", "aria-controls", "implicit-label"] {
+                let chooser = match association {
+                    "label" => json!({"nodeType":1,"nodeName":"LABEL","backendNodeId":10,
+                        "attributes":["for","upload"]}),
+                    "aria-controls" => json!({"nodeType":1,"nodeName":"BUTTON","backendNodeId":10,
+                        "attributes":["aria-controls","upload"]}),
+                    _ => json!({"nodeType":1,"nodeName":"LABEL","backendNodeId":10}),
+                };
+                let input = json!({"nodeType":1,"nodeName":"INPUT","backendNodeId":11,
+                    "attributes":["id","upload","type","file","style","display:none"]});
+                let children = if association == "implicit-label" {
+                    let mut label = chooser;
+                    label["children"] = json!([input]);
+                    json!([label])
+                } else {
+                    json!([chooser, input])
+                };
+                let inner = if boundary == "shadow" {
+                    json!({"nodeType":11,"nodeName":"#document-fragment","backendNodeId":2,
+                        "shadowRootType":"open","children":children})
+                } else {
+                    json!({"nodeType":9,"nodeName":"#document","backendNodeId":2,
+                        "frameId":"F_CHILD","children":children})
+                };
+                let mut host = json!({"nodeType":1,"nodeName":"DIV","backendNodeId":1});
+                if boundary == "shadow" {
+                    host["shadowRoots"] = json!([inner]);
+                } else {
+                    host["nodeName"] = json!("IFRAME");
+                    host["contentDocument"] = inner;
+                }
+                let dom =
+                    build_dom_index(&json!({"nodeType":9,"frameId":"F_MAIN","children":[host]}));
+                assert_eq!(
+                    dom.unique_associated_file_input(10),
+                    Some(11),
+                    "{boundary}/{association}"
+                );
+                // The outer host may not acquire the inner document's input.
+                assert_eq!(dom.unique_associated_file_input(1), None);
+            }
+        }
+    }
+
+    #[test]
+    fn implicit_upload_label_refuses_other_labelable_controls() {
+        for tag in [
+            "INPUT",
+            "BUTTON",
+            "SELECT",
+            "TEXTAREA",
+            "METER",
+            "OUTPUT",
+            "PROGRESS",
+            "CUSTOM-CONTROL",
+        ] {
+            for input_first in [false, true] {
+                let other = json!({"nodeType":1,"nodeName":tag,"backendNodeId":11,
+                    "attributes":["type","text"]});
+                let file = json!({"nodeType":1,"nodeName":"INPUT","backendNodeId":12,
+                    "attributes":["type","file","style","display:none"]});
+                let children = if input_first {
+                    json!([file, other])
+                } else {
+                    json!([other, file])
+                };
+                let dom = build_dom_index(&json!({"nodeType":9,"frameId":"F_MAIN","children":[
+                    {"nodeType":1,"nodeName":"LABEL","backendNodeId":10,"children":children}
+                ]}));
+                assert_eq!(
+                    dom.unique_associated_file_input(10),
+                    None,
+                    "{tag}/{input_first}"
+                );
+            }
+        }
+        // A hidden-type input is not labelable; CSS-hidden file inputs are.
+        let dom = build_dom_index(&json!({"nodeType":9,"frameId":"F_MAIN","children":[
+            {"nodeType":1,"nodeName":"LABEL","backendNodeId":10,"children":[
+                {"nodeType":1,"nodeName":"INPUT","backendNodeId":11,"attributes":["type","hidden"]},
+                {"nodeType":1,"nodeName":"INPUT","backendNodeId":12,"attributes":["type","file","style","display:none"]}
+            ]}
+        ]}));
+        assert_eq!(dom.unique_associated_file_input(10), Some(12));
+    }
+
     use crate::browser::store::FrameRef;
 
     fn frame() -> FrameRef {
@@ -2119,6 +2257,84 @@ mod tests {
             complete: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn direct_scope_and_outline_preserve_same_process_iframe_descendants() {
+        let main = proven_frame(FrameKind::Main, "main");
+        let child = proven_frame(FrameKind::Iframe, "child");
+        let oopif = proven_frame(FrameKind::Oopif, "other");
+        let document = scope_document(vec![
+            scope_node(
+                "container",
+                None,
+                &["iframe-root"],
+                Some(10),
+                "group",
+                Some("Panel"),
+                main.clone(),
+                0,
+            ),
+            scope_node(
+                "iframe-root",
+                Some("container"),
+                &["button"],
+                Some(11),
+                "rootwebarea",
+                None,
+                child.clone(),
+                1,
+            ),
+            scope_node(
+                "button",
+                Some("iframe-root"),
+                &[],
+                Some(12),
+                "button",
+                Some("Inside"),
+                child,
+                2,
+            ),
+            // Reused AX ids in another renderer cannot join the direct scope.
+            scope_node(
+                "iframe-root",
+                Some("container"),
+                &["button"],
+                Some(11),
+                "rootwebarea",
+                None,
+                oopif.clone(),
+                3,
+            ),
+            scope_node(
+                "button",
+                Some("iframe-root"),
+                &[],
+                Some(12),
+                "button",
+                Some("Other renderer"),
+                oopif,
+                4,
+            ),
+        ]);
+        let source = document.nodes[0].to_ref_entry().unwrap();
+        let anchor = document.resolve_scope("c1", &source, None).unwrap();
+        let page = document.page(0, 300, None, Some(&anchor.identity));
+        assert_eq!(
+            page.selected
+                .iter()
+                .map(|node| node.backend_node_id)
+                .collect::<Vec<_>>(),
+            vec![Some(12), Some(10), Some(11)]
+        );
+        assert_eq!(page.outline, "- group \"Panel\"\n  - button \"Inside\"");
+        let query = document.page(0, 300, Some("Inside"), None);
+        assert_eq!(query.outline, "- group \"Panel\"\n  - button \"Inside\"");
+        // Ancestor scope deliberately retains the stricter same-frame proof.
+        assert_eq!(
+            document.validate_ancestor_subtree(&anchor.identity),
+            Err(SemanticScopeFailure::CrossFrame)
+        );
     }
 
     #[test]
