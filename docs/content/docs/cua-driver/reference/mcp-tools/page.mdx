@@ -64,11 +64,12 @@ Effect: read-only, idempotent. Platforms: macOS, Linux, Windows.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| <span id="get_browser_state--continuation"></span>`continuation` | `string` |  | Opaque continuation minted by an earlier semantic_v2 response. |
+| <span id="get_browser_state--continuation"></span>`continuation` | `string` |  | Opaque continuation minted by an earlier semantic_v2 response. Requires target_id, tab_id and snapshot_format=semantic_v2; cannot be combined with scope_ref, scope_ancestor_role or query. |
 | <span id="get_browser_state--include_screenshot"></span>`include_screenshot` | `boolean` | `false` | Capture the exact tab viewport as PNG through CDP without selecting the tab or foregrounding its native window. The request refuses if capture cannot be completed. |
 | <span id="get_browser_state--pid"></span>`pid` | `integer` |  | Native browser process id (bind mode). |
-| <span id="get_browser_state--query"></span>`query` | `string` |  | Read-only semantic match over role, accessible name, and visible text. |
-| <span id="get_browser_state--scope_ref"></span>`scope_ref` | `string` |  | Current semantic/content ref whose subtree should be observed. |
+| <span id="get_browser_state--query"></span>`query` | `string` |  | Read-only semantic match over role, accessible name, and visible text. Requires target_id, tab_id and snapshot_format=semantic_v2; cannot be combined with continuation. |
+| <span id="get_browser_state--scope_ancestor_role"></span>`scope_ancestor_role` | `string` |  | Resolve scope_ref to its nearest strict same-frame ancestor with this exact accessibility role, then apply query inside that subtree. Requires scope_ref and query. |
+| <span id="get_browser_state--scope_ref"></span>`scope_ref` | `string` |  | Current semantic/content ref whose subtree should be observed. Requires target_id, tab_id and snapshot_format=semantic_v2; cannot be combined with continuation. |
 | <span id="get_browser_state--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session. |
 | <span id="get_browser_state--snapshot_format"></span>`snapshot_format` | `"dom_refs_v1" \| "semantic_v2"` |  | Versioned snapshot contract. dom_refs_v1 remains the compatibility default. |
 | <span id="get_browser_state--tab_id"></span>`tab_id` | `string` |  | Opaque tab id from get_browser_state (session-scoped). |
@@ -102,6 +103,7 @@ Effect: mutating. Platforms: macOS, Linux, Windows.
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
+| <span id="browser_navigate--delivery_mode"></span>`delivery_mode` | `"background" \| "foreground"` | `"background"` | Background preserves the selected tab. Foreground explicitly selects this exact tab and returns live page readback. |
 | <span id="browser_navigate--session"></span>`session` | `string` |  | For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session. |
 | <span id="browser_navigate--tab_id"></span>`tab_id` | `string` | required | Opaque tab id from get_browser_state (session-scoped). |
 | <span id="browser_navigate--target_id"></span>`target_id` | `string` | required | Opaque browser target id minted by get_browser_state (session-scoped; never a CDP id). |

@@ -16,7 +16,7 @@ description: "Exact browser input over CDP: clicks, typing, pointer, dialogs, fi
 | [`browser_type`](#browser_type) | Type text into an exactly-bound tab via the Input domain. | macOS, Linux, Windows |
 | [`browser_pointer`](#browser_pointer) | Perform hover, right-click, double-click, scroll, or drag in an exactly-bound browser tab. | macOS, Linux, Windows |
 | [`browser_dialog`](#browser_dialog) | Inspect or resolve a page-owned JavaScript alert, confirm, prompt, or beforeunload dialog on one exactly-bound tab. | macOS, Linux, Windows |
-| [`browser_set_input_files`](#browser_set_input_files) | Assign one or more explicit absolute local files to an exact live &lt;input type=file&gt; ref through CDP. | macOS, Linux, Windows |
+| [`browser_set_input_files`](#browser_set_input_files) | Assign one or more explicit absolute local files to an exact live &lt;input type=file&gt; ref, or to a visible semantic chooser explicitly and uniquely associated with one hidden file input. | macOS, Linux, Windows |
 | [`browser_download`](#browser_download) | Trigger one download through an exact live browser ref and save it inside an explicitly approved directory. | macOS, Linux, Windows |
 
 Served by `cua-driver mcp`; see [MCP tools](/cua-driver/reference/mcp-tools) for every tool.
@@ -119,7 +119,7 @@ Effect: mutating. Platforms: macOS, Linux, Windows.
 
 ## `browser_set_input_files`
 
-Assign one or more explicit absolute local files to an exact live &lt;input type=file&gt; ref through CDP. This bypasses native file pickers, rejects symlinks and non-regular files, and never returns local paths.
+Assign one or more explicit absolute local files to an exact live &lt;input type=file&gt; ref, or to a visible semantic chooser explicitly and uniquely associated with one hidden file input. This bypasses native file pickers, rejects ambiguous associations, symlinks, and non-regular files, and never returns local paths.
 
 Effect: mutating. Platforms: macOS, Linux, Windows.
 

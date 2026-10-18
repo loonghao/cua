@@ -92,6 +92,13 @@ when the official 0.36 source already satisfies the current gate.
   remove those runtime checks. Legacy bind-mode handling of non-ancestor
   optional fields is unchanged.
   The live protocol roster includes explicit foreground browser navigation.
+- An embedding host that intentionally clears every registered tool retains an
+  empty dispatch surface. The new default visual-parser fallback must not
+  repopulate a pixels-only runtime after that hook. Canonical and custom
+  perception inventories keep their existing behavior.
+- Generated browser references are refreshed from the exact native Linux,
+  macOS and Windows registry snapshots produced by the compatibility CI. The
+  canonical generator renders the shared pages; schemas are not hand-edited.
 
 Three actual semantic owner tests failed before the boundary corrections and
 passed afterward, and the existing schema/runtime test failed on `allOf`
