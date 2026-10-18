@@ -33,6 +33,8 @@ pub(crate) struct MockEvent {
 /// The scripted reaction to one command.
 pub(crate) struct MockReply {
     pub events: Vec<MockEvent>,
+    /// Close after the handler ran, before acknowledging the command.
+    close_without_reply: bool,
     pub result: Result<Value, (i64, String)>,
 }
 
@@ -40,6 +42,7 @@ impl MockReply {
     pub fn ok(result: Value) -> Self {
         Self {
             events: Vec::new(),
+            close_without_reply: false,
             result: Ok(result),
         }
     }
@@ -47,7 +50,15 @@ impl MockReply {
     pub fn err(code: i64, message: &str) -> Self {
         Self {
             events: Vec::new(),
+            close_without_reply: false,
             result: Err((code, message.to_owned())),
+        }
+    }
+
+    pub fn close_without_reply() -> Self {
+        Self {
+            close_without_reply: true,
+            ..Self::ok(json!({}))
         }
     }
 
@@ -114,6 +125,10 @@ impl MockCdpServer {
                                 .map(str::to_owned),
                         };
                         let reply = handler(&call);
+                        if reply.close_without_reply {
+                            let _ = ws.close(None).await;
+                            return;
+                        }
                         for event in reply.events {
                             let mut frame =
                                 json!({ "method": event.method, "params": event.params });

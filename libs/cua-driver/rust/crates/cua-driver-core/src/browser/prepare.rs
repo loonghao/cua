@@ -27,6 +27,34 @@ use super::BrowserEngine;
 const PROFILE_MARKER: &str = ".cua-driver-owned-profile.json";
 const PROFILE_SCHEMA: &str = "cua-driver-browser-profile-v1";
 
+async fn claim_responsive_existing_profile_socket(
+    pool: &super::cdp_ws::CdpPool,
+    ws_url: &str,
+    generation: u64,
+) -> anyhow::Result<Arc<super::cdp_ws::CdpConnection>> {
+    let connection = pool.claim_existing(ws_url, generation).await?;
+    if let Err(error) = connection
+        .call(None, "Target.getTargets", serde_json::json!({}))
+        .await
+    {
+        // Chrome approval-only mode can complete the WebSocket handshake yet
+        // leave that socket unable to answer CDP. Do not publish such a
+        // connection as prepared. Release only this grant's hold: the last
+        // holder closes the failed socket so the bounded retry can redial,
+        // while a peer session retains ownership of its shared connection.
+        pool.release_existing(
+            ws_url,
+            generation,
+            super::cdp_ws::SharedSocketRelease::Close,
+        )
+        .await;
+        return Err(anyhow::anyhow!(
+            "the approved browser socket did not answer its liveness probe: {error}"
+        ));
+    }
+    Ok(connection)
+}
+
 fn validate_profile(profile: &PrepareProfile) -> Result<(), BrowserRefusal> {
     match profile.mode {
         PrepareProfileMode::IsolatedNew => {
@@ -321,12 +349,15 @@ impl Drop for ManagedBrowser {
             // transfer the browser role to a descendant. The listener owner
             // was attested inside that driver-spawned process tree, so reap
             // that exact process tree when its owning session ends.
-            let _ = Command::new("taskkill.exe")
-                .args(["/PID", &self.owned_pid.to_string(), "/T", "/F"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let _ = crate::owned_process::command(
+                crate::owned_process::OwnedConsoleChildRole::BrowserProcessTreeCleanup,
+                "taskkill.exe",
+            )
+            .args(["/PID", &self.owned_pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -1324,7 +1355,11 @@ impl BrowserEngine {
             }
         }
         let (claimed, displayed_consent_prompt) = match claim_with_delayed_consent(
-            self.pool.claim_existing(&endpoint.ws_url, grant.generation),
+            claim_responsive_existing_profile_socket(
+                &self.pool,
+                &endpoint.ws_url,
+                grant.generation,
+            ),
             |action| {
                 self.platform
                     .handle_existing_profile_consent(BrowserConsentRequest {
@@ -1367,7 +1402,11 @@ impl BrowserEngine {
         // each genuinely new browser-level socket, the one fresh dial handles
         // one exact browser-owned prompt against the same PID and window.
         let retry = claim_with_delayed_consent(
-            self.pool.claim_existing(&endpoint.ws_url, grant.generation),
+            claim_responsive_existing_profile_socket(
+                &self.pool,
+                &endpoint.ws_url,
+                grant.generation,
+            ),
             |action| {
                 self.platform
                     .handle_existing_profile_consent(BrowserConsentRequest {
@@ -1485,6 +1524,7 @@ impl BrowserEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::mock_cdp::{MockCdpServer, MockReply};
 
     #[tokio::test]
     async fn spawned_attestation_retries_absence_but_propagates_profile_errors() {
@@ -1738,6 +1778,62 @@ mod tests {
             result.unwrap_err().code,
             BrowserRefusalCode::BrowserWrongTargetRefused
         );
+    }
+
+    #[tokio::test]
+    async fn unresponsive_claim_is_evicted_before_the_one_fresh_probe() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler_calls = calls.clone();
+        let server = MockCdpServer::start(Arc::new(move |call| {
+            assert_eq!(call.method, "Target.getTargets");
+            if handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                MockReply::method_not_found("Target.getTargets")
+            } else {
+                MockReply::ok(serde_json::json!({"targetInfos": []}))
+            }
+        }))
+        .await;
+        let pool = super::super::cdp_ws::CdpPool::new();
+        let url = server.ws_url();
+
+        let first = claim_responsive_existing_profile_socket(&pool, &url, 1).await;
+        assert!(
+            first.is_err(),
+            "an unusable handshake must not count as prepared"
+        );
+        assert!(
+            pool.get_existing(&url, 1).await.is_err(),
+            "the unusable socket must be evicted before retry"
+        );
+
+        let second = claim_responsive_existing_profile_socket(&pool, &url, 1)
+            .await
+            .expect("the one fresh socket should pass its CDP liveness proof");
+        assert!(!second.is_closed());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        pool.release_existing(&url, 1, super::super::cdp_ws::SharedSocketRelease::Close)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn failed_liveness_probe_releases_only_its_own_shared_socket_hold() {
+        let server = MockCdpServer::start(Arc::new(|_| {
+            MockReply::method_not_found("Target.getTargets")
+        }))
+        .await;
+        let pool = super::super::cdp_ws::CdpPool::new();
+        let url = server.ws_url();
+        let peer = pool.claim_existing(&url, 10).await.unwrap();
+
+        assert!(claim_responsive_existing_profile_socket(&pool, &url, 20)
+            .await
+            .is_err());
+        let retained = pool.get_existing(&url, 10).await.unwrap();
+        assert!(Arc::ptr_eq(&peer, &retained));
+        assert!(!retained.is_closed());
+        assert!(pool.get_existing(&url, 20).await.is_err());
+        pool.release_existing(&url, 10, super::super::cdp_ws::SharedSocketRelease::Close)
+            .await;
     }
 
     #[tokio::test]

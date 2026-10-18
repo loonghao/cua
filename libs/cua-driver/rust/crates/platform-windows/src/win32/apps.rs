@@ -81,24 +81,10 @@ fn descendants_from_processes(root_pid: u32, all: &[ProcessInfo]) -> Vec<u32> {
     result
 }
 
-/// Like `list_descendants` but ALSO returns processes whose executable name
-/// matches a prefix derived from `exe_basename`. This catches the LibreOffice
-/// pattern (swriter.exe spawns soffice.bin via a parent-pid relationship we
-/// might miss if the spawn happened before our pre-launch snapshot, OR via
-/// CreateProcess flags that detach the child from the launcher's tree) as
-/// well as the GIMP pattern (gimp-3.exe spawns gimp-3.2.exe whose name starts
-/// with the same prefix).
-///
-/// Heuristic: strip extension and trailing version digits/dots/dashes from
-/// the basename to derive a stable prefix. E.g.:
-///   `gimp-3.exe`     → prefix `gimp`
-///   `gimp-3.2.exe`   → prefix `gimp`
-///   `swriter.exe`    → prefix `swriter` (won't match `soffice.bin` — that's
-///                      LibreOffice's parent-pid path; usually still reachable
-///                      via `list_descendants`)
-///   `notepad++.exe`  → prefix `notepad++` (no version stripping needed)
-///
-/// Returns deduplicated pids; ordering favors descendants over name-matches.
+/// Discover descendants and processes sharing an executable-name prefix.
+/// These are discovery candidates, not proof of launch ownership. Retained for
+/// callers of the existing public Win32 API; launch resolution must use
+/// `launched_processes` instead.
 pub fn related_processes(root_pid: u32, exe_basename: &str) -> Vec<u32> {
     let mut out = list_descendants(root_pid);
     let prefix = strip_version_suffix(exe_basename);
@@ -114,15 +100,11 @@ pub fn related_processes(root_pid: u32, exe_basename: &str) -> Vec<u32> {
     out
 }
 
-/// Strip `.exe` (case-insensitive) and any trailing `-<digits>.<digits>...`
-/// or `<digits>.<digits>...` version suffix. Used by `related_processes` to
-/// match `gimp-3.exe` and `gimp-3.2.exe` under the common prefix `gimp`.
 fn strip_version_suffix(basename: &str) -> String {
     let mut s = basename.to_ascii_lowercase();
     if let Some(stripped) = s.strip_suffix(".exe") {
         s = stripped.to_owned();
     }
-    // Strip trailing version-like tail: `-3`, `-3.2`, `3`, `3.2`, etc.
     let bytes = s.as_bytes();
     let mut cut = bytes.len();
     while cut > 0 {
@@ -133,12 +115,38 @@ fn strip_version_suffix(basename: &str) -> String {
             break;
         }
     }
-    // Avoid stripping an entire name (e.g. "7z" → "" would lose information).
-    // If everything past cut is purely digits/dots/dashes AND cut > 0, accept.
     if cut == 0 {
         return s;
     }
     s[..cut].to_string()
+}
+
+/// Return the launched PID and only its descendants absent before launch.
+/// Executable names do not establish ownership. The root comes from the native
+/// launch receipt and remains valid even when its window has not appeared yet.
+pub fn launched_processes(
+    root_pid: u32,
+    pre_launch_pids: &std::collections::HashSet<u32>,
+) -> Vec<u32> {
+    launched_processes_from_snapshot(root_pid, pre_launch_pids, &list_processes())
+}
+
+fn launched_processes_from_snapshot(
+    root_pid: u32,
+    pre_launch_pids: &std::collections::HashSet<u32>,
+    current: &[ProcessInfo],
+) -> Vec<u32> {
+    if root_pid == 0 {
+        return Vec::new();
+    }
+    // Remove old branches before traversal so a reused parent PID cannot make
+    // another application's newly spawned children part of this launch.
+    let eligible: Vec<_> = current
+        .iter()
+        .filter(|process| process.pid == root_pid || !pre_launch_pids.contains(&process.pid))
+        .cloned()
+        .collect();
+    descendants_from_processes(root_pid, &eligible)
 }
 
 #[cfg(test)]
@@ -169,5 +177,58 @@ mod tests {
         assert_eq!(descendants, vec![42, 43, 45, 44]);
         assert!(!descendants.contains(&99));
         assert!(!descendants.contains(&100));
+    }
+
+    #[test]
+    fn launch_does_not_adopt_existing_or_new_same_name_processes() {
+        let mut processes = vec![process(42, 1), process(99, 1), process(100, 1)];
+        for entry in &mut processes {
+            entry.name = "maya.exe".into();
+        }
+        let before = [99].into_iter().collect();
+        assert_eq!(
+            launched_processes_from_snapshot(42, &before, &processes),
+            vec![42]
+        );
+    }
+
+    #[test]
+    fn launch_keeps_renamed_descendants_after_launcher_exit() {
+        let mut child = process(43, 42);
+        child.name = "soffice.bin".into();
+        let processes = vec![child, process(44, 43)];
+        assert_eq!(
+            launched_processes_from_snapshot(42, &Default::default(), &processes),
+            vec![42, 43, 44]
+        );
+    }
+
+    #[test]
+    fn launch_prunes_existing_pid_branches_and_their_new_children() {
+        let processes = vec![
+            process(42, 1),
+            process(43, 42),
+            process(44, 43),
+            process(45, 42),
+        ];
+        let before = [43].into_iter().collect();
+        assert_eq!(
+            launched_processes_from_snapshot(42, &before, &processes),
+            vec![42, 45]
+        );
+    }
+
+    #[test]
+    fn launch_retains_receipt_pid_when_no_window_process_is_available() {
+        assert_eq!(
+            launched_processes_from_snapshot(42, &Default::default(), &[]),
+            vec![42]
+        );
+    }
+
+    #[test]
+    fn launch_without_a_native_pid_receipt_has_no_owned_candidates() {
+        let processes = vec![process(99, 0), process(100, 99)];
+        assert!(launched_processes_from_snapshot(0, &Default::default(), &processes).is_empty());
     }
 }

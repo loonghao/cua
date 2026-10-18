@@ -241,6 +241,8 @@ fn assert_tools_list_schema_shape(mut d: RawDriver) {
         // Existing-profile attachment that would bring the browser forward
         // (macOS Chrome); foreground accepts that.
         "browser_prepare",
+        // The compatibility route explicitly supports foreground activation.
+        "browser_navigate",
         // The batch's default for its steps' own delivery_mode.
         "run_steps",
         // macOS desktop move_cursor refuses over a background app unless

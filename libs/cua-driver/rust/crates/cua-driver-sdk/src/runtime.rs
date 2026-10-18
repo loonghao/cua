@@ -592,14 +592,18 @@ fn build_registry(options: &RuntimeOptions) -> ToolRegistry {
     if let Some(register_host_tools) = options.register_host_tools {
         register_host_tools(&mut registry);
     }
-    let perception_registered = registry.tools_list()["tools"]
-        .as_array()
-        .is_some_and(|tools| {
-            tools.iter().any(|tool| {
-                tool.get("name").and_then(Value::as_str) == Some("parse_visual_regions")
-            })
-        });
-    if !perception_registered {
+    let inventory = registry.tools_list();
+    let tools = inventory["tools"].as_array();
+    // A trusted embedding host can deliberately clear the registry for a
+    // pixels-only runtime. Do not recreate a dispatch surface after that hook.
+    let host_cleared_registry =
+        options.register_host_tools.is_some() && registry.iter_defs().next().is_none();
+    let perception_registered = tools.is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|tool| tool.get("name").and_then(Value::as_str) == Some("parse_visual_regions"))
+    });
+    if !host_cleared_registry && !perception_registered {
         registry.register_perception_tool(crate::configured_perception_client());
     }
     let recording = Arc::downgrade(&registry.recording);
@@ -778,6 +782,58 @@ mod tests {
                 .filter(|tool| tool["name"] == "parse_visual_regions")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn host_empty_registry_is_not_repopulated_with_perception() {
+        let mut options = RuntimeOptions::embedded(false);
+        options.register_host_tools = Some(|registry| *registry = ToolRegistry::new());
+        let inventory = tool_inventory(options);
+        assert_eq!(inventory["tools"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn policy_hidden_native_tools_do_not_mean_the_host_cleared_the_registry() {
+        const CHILD: &str = "CUA_TEST_HOST_REGISTRY_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut options = RuntimeOptions::embedded(false);
+            options.register_host_tools = Some(|_| {});
+            let inventory = tool_inventory(options);
+            let names: Vec<_> = inventory["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(names, ["parse_visual_regions"]);
+            return;
+        }
+        // Policy is process-immutable, so exercise a real policy in a fresh
+        // test process rather than mutating this test runner's environment.
+        let home = tempfile::tempdir().unwrap();
+        let policy = home.path().join("policy.yaml");
+        std::fs::write(&policy, "allow:\n  tools: [parse_visual_regions]\n").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::tests::policy_hidden_native_tools_do_not_mean_the_host_cleared_the_registry",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("CUA_TELEMETRY", "0")
+            .env("CUA_DRIVER_POLICY_FILE", &policy)
+            .env_remove("CUA_DRIVER_MANAGED_POLICY_FILE")
+            .env_remove("CUA_WAYLAND_NEST")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "policy registry probe failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         );
     }
 

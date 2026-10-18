@@ -2095,7 +2095,7 @@
     "additionalProperties": true,
     "properties": {
      "continuation": {
-      "description": "Opaque continuation minted by an earlier semantic_v2 response.",
+      "description": "Opaque continuation minted by an earlier semantic_v2 response. Requires target_id, tab_id and snapshot_format=semantic_v2; cannot be combined with scope_ref, scope_ancestor_role or query.",
       "type": "string"
      },
      "include_screenshot": {
@@ -2108,11 +2108,18 @@
       "type": "integer"
      },
      "query": {
-      "description": "Read-only semantic match over role, accessible name, and visible text.",
+      "description": "Read-only semantic match over role, accessible name, and visible text. Requires target_id, tab_id and snapshot_format=semantic_v2; cannot be combined with continuation.",
+      "type": "string"
+     },
+     "scope_ancestor_role": {
+      "description": "Resolve scope_ref to its nearest strict same-frame ancestor with this exact accessibility role, then apply query inside that subtree. Requires scope_ref and query.",
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
       "type": "string"
      },
      "scope_ref": {
-      "description": "Current semantic/content ref whose subtree should be observed.",
+      "description": "Current semantic/content ref whose subtree should be observed. Requires target_id, tab_id and snapshot_format=semantic_v2; cannot be combined with continuation.",
       "type": "string"
      },
      "session": {
@@ -2228,6 +2235,15 @@
    "input_schema": {
     "additionalProperties": true,
     "properties": {
+     "delivery_mode": {
+      "default": "background",
+      "description": "Background preserves the selected tab. Foreground explicitly selects this exact tab and returns live page readback.",
+      "enum": [
+       "background",
+       "foreground"
+      ],
+      "type": "string"
+     },
      "session": {
       "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session.",
       "type": "string"
@@ -2421,7 +2437,7 @@
    "read_only": false
   },
   {
-   "description": "Assign one or more explicit absolute local files to an exact live <input type=file> ref through CDP. This bypasses native file pickers, rejects symlinks and non-regular files, and never returns local paths.",
+   "description": "Assign one or more explicit absolute local files to an exact live <input type=file> ref, or to a visible semantic chooser explicitly and uniquely associated with one hidden file input. This bypasses native file pickers, rejects ambiguous associations, symlinks, and non-regular files, and never returns local paths.",
    "destructive": false,
    "idempotent": false,
    "input_schema": {
