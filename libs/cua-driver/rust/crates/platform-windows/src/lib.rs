@@ -103,6 +103,9 @@ mod browser_standard_user;
 pub mod standard_user_launch;
 
 #[cfg(target_os = "windows")]
+mod subprocess;
+
+#[cfg(target_os = "windows")]
 mod browser_consent_ui;
 #[cfg(target_os = "windows")]
 mod browser_setup_ui;

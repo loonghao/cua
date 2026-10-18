@@ -390,7 +390,7 @@ fn authenticode_output(executable: &std::path::Path) -> std::io::Result<std::pro
         ));
     };
     let powershell = system32.join(r"WindowsPowerShell\v1.0\powershell.exe");
-    std::process::Command::new(powershell)
+    crate::subprocess::std_hidden(powershell)
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -762,7 +762,7 @@ async fn browser_command_line(pid: u32) -> Result<String, BrowserRefusal> {
     let script = format!(
         "$OutputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' -ErrorAction Stop).CommandLine"
     );
-    let output = tokio::process::Command::new(powershell)
+    let output = crate::subprocess::tokio_hidden(powershell)
         .args([
             "-NoLogo",
             "-NoProfile",
