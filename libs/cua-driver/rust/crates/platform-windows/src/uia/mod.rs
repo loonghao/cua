@@ -638,9 +638,11 @@ unsafe fn walk_cached_bounded(
 
     let (control_type, emitted_parent) = emit_cached_node(
         element,
-        depth,
-        parent_index,
-        in_web_content,
+        NodeProjectionContext {
+            depth,
+            parent_index,
+            in_web_content,
+        },
         None,
         nodes,
         lines,
@@ -821,9 +823,11 @@ unsafe fn walk_native_level(
     };
     let (control_type, emitted_parent) = emit_cached_node(
         element,
-        depth,
-        parent_index,
-        false,
+        NodeProjectionContext {
+            depth,
+            parent_index,
+            in_web_content: false,
+        },
         complete_type,
         nodes,
         lines,
@@ -876,19 +880,28 @@ unsafe fn walk_native_level(
     Ok(())
 }
 
-/// Project one cached element into `nodes`/`lines`. Returns its control type
-/// and the parent index its descendants should inherit.
-#[allow(clippy::too_many_arguments)]
-fn emit_cached_node(
-    element: &IUIAutomationElement,
+/// A node's tree position and native/renderer boundary during projection.
+struct NodeProjectionContext {
     depth: usize,
     parent_index: Option<usize>,
     in_web_content: bool,
+}
+
+/// Project one cached element into `nodes`/`lines`. Returns its control type
+/// and the parent index its descendants should inherit.
+fn emit_cached_node(
+    element: &IUIAutomationElement,
+    context: NodeProjectionContext,
     complete_type: Option<String>,
     nodes: &mut Vec<UiaNode>,
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
 ) -> (String, Option<usize>) {
+    let NodeProjectionContext {
+        depth,
+        parent_index,
+        in_web_content,
+    } = context;
     let include_inert = complete_type.is_some();
     let control_type = complete_type.unwrap_or_else(|| read_cached_control_type(element));
     let name = read_cached_bstr_name(element);
