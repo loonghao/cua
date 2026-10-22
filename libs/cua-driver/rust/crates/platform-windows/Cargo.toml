@@ -54,6 +54,9 @@ windows = { version = "0.58", features = [
     # token an elevated Driver uses to run isolated browsers.
     "Win32_Security_AppLocker",
     "Win32_System_Com",
+    # SAFEARRAY ownership for opaque UIA runtime IDs used by setup-tab cleanup.
+    "Win32_System_Ole",
+    "Win32_System_Variant",
     "Win32_Storage_Xps",
     "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
