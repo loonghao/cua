@@ -1021,6 +1021,7 @@ pub struct TrustedInvocationEvidence {
     session_id: Option<String>,
     transport_session_id: Option<String>,
     browser_download_mcp_host_approved: bool,
+    browser_download_metadata_requested: bool,
     /// Who originated the input (`_input_origin`): a trusted host relaying
     /// a human's input marks it so no agent cursor is drawn for it.
     input_origin: Option<crate::agent_cursor::InputOrigin>,
@@ -1045,6 +1046,10 @@ impl TrustedInvocationEvidence {
                 .filter(|value| !value.is_empty());
             evidence.browser_download_mcp_host_approved = arguments
                 .remove(crate::browser::download::MCP_HOST_DOWNLOAD_APPROVAL_ARG)
+                .and_then(|value| value.as_bool())
+                == Some(true);
+            evidence.browser_download_metadata_requested = arguments
+                .remove(crate::browser::download::MCP_HOST_DOWNLOAD_METADATA_ARG)
                 .and_then(|value| value.as_bool())
                 == Some(true);
             evidence.input_origin = arguments
@@ -1096,6 +1101,12 @@ impl TrustedInvocationEvidence {
                 crate::browser::download::MCP_HOST_DOWNLOAD_APPROVAL_ARG.to_owned(),
                 Value::Bool(true),
             );
+            if self.browser_download_metadata_requested {
+                arguments.insert(
+                    crate::browser::download::MCP_HOST_DOWNLOAD_METADATA_ARG.to_owned(),
+                    Value::Bool(true),
+                );
+            }
         }
         if self.native_window_pixels {
             arguments.insert(
@@ -5513,6 +5524,8 @@ resources:
                 serde_json::json!({
                     "_protected_process_fingerprint": {"pid": 1},
                     "_session_id": "forged",
+                    "_cua_browser_download_mcp_host_approved": true,
+                    "_cua_browser_download_metadata_requested": true,
                     "files": ["/does/not/matter"]
                 }),
                 unrestricted_context(),
@@ -5523,6 +5536,12 @@ resources:
         let received = last_args.lock().unwrap().clone().unwrap();
         assert!(received.get("_protected_process_fingerprint").is_none());
         assert!(received.get("_session_id").is_none());
+        assert!(received
+            .get("_cua_browser_download_mcp_host_approved")
+            .is_none());
+        assert!(received
+            .get("_cua_browser_download_metadata_requested")
+            .is_none());
     }
 
     #[tokio::test]
@@ -5535,6 +5554,7 @@ resources:
             "_session_id": "trusted-owner",
             "_transport_session_id": "transport-a",
             "_cua_browser_download_mcp_host_approved": true,
+            "_cua_browser_download_metadata_requested": true,
             "_protected_process_fingerprint": {"pid": 1},
             "files": ["/does/not/matter"]
         });
@@ -5568,7 +5588,29 @@ resources:
             received["_cua_browser_download_mcp_host_approved"],
             serde_json::Value::Bool(true)
         );
+        assert_eq!(
+            received["_cua_browser_download_metadata_requested"],
+            serde_json::Value::Bool(true)
+        );
         assert!(received.get("_protected_process_fingerprint").is_none());
+    }
+
+    #[test]
+    fn trusted_download_metadata_opt_in_requires_download_approval() {
+        for approval in [
+            serde_json::Value::Null,
+            serde_json::Value::Bool(false),
+            serde_json::Value::String("true".into()),
+        ] {
+            let mut args = serde_json::json!({
+                "_cua_browser_download_mcp_host_approved": approval,
+                "_cua_browser_download_metadata_requested": true,
+            });
+            let evidence = TrustedInvocationEvidence::extract_from_adapter_args(&mut args);
+            assert_eq!(args, serde_json::json!({}));
+            evidence.apply_runtime_args(&mut args);
+            assert_eq!(args, serde_json::json!({}));
+        }
     }
 
     #[tokio::test]
@@ -6141,6 +6183,7 @@ fn recording_args_for(tool_name: &str, args: &Value) -> Value {
             }
             "browser_download" => {
                 arguments.remove("_cua_browser_download_mcp_host_approved");
+                arguments.remove("_cua_browser_download_metadata_requested");
                 if arguments.contains_key("destination_root") {
                     arguments.insert(
                         "destination_root".to_owned(),
@@ -6257,11 +6300,15 @@ mod capability_tests {
             &serde_json::json!({
                 "destination_root": "/private/destination",
                 "_cua_browser_download_mcp_host_approved": true,
+                "_cua_browser_download_metadata_requested": true,
             }),
         );
         assert_eq!(download["destination_root"], "[redacted]");
         assert!(download
             .get("_cua_browser_download_mcp_host_approved")
+            .is_none());
+        assert!(download
+            .get("_cua_browser_download_metadata_requested")
             .is_none());
 
         let serialized = serde_json::json!([dialog, upload, download]).to_string();

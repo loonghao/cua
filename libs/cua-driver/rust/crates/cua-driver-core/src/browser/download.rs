@@ -2,8 +2,8 @@
 //!
 //! Chromium's download behavior is browser-wide, so this tool enables it only
 //! for the bounded interval around one exact ref mutation and restores the
-//! default before returning. Output deliberately omits URLs, filenames, and
-//! local paths.
+//! default before returning. Output omits URLs and local paths. Source filename
+//! metadata requires a separate trusted-host opt-in after download approval.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -25,6 +25,9 @@ use super::store::BrowserActionKind;
 /// Injected by an MCP host only after its destructive-tool approval flow.
 /// It is intentionally absent from the public input schema.
 pub const MCP_HOST_DOWNLOAD_APPROVAL_ARG: &str = "_cua_browser_download_mcp_host_approved";
+/// Trusted hosts may request bounded source metadata for an approved download.
+/// Public callers cannot supply this transport-only evidence.
+pub const MCP_HOST_DOWNLOAD_METADATA_ARG: &str = "_cua_browser_download_metadata_requested";
 
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -200,9 +203,53 @@ async fn reset_download_behavior(conn: &CdpConnection) {
         .await;
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SuggestedFilename {
+    Provided(String),
+    Unavailable,
+    Invalid,
+}
+
+impl SuggestedFilename {
+    fn from_event(value: Option<&Value>) -> Self {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Self::Unavailable;
+        };
+        let Some(name) = value.as_str() else {
+            return Self::Invalid;
+        };
+        if name.trim().is_empty()
+            || name.len() > 1024
+            || name.chars().count() > 255
+            || matches!(name, "." | "..")
+            || name
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+        {
+            return Self::Invalid;
+        }
+        Self::Provided(name.to_owned())
+    }
+
+    fn append_to(self, result: &mut Value) {
+        let (name, status) = match self {
+            Self::Provided(name) => (Value::String(name), "provided"),
+            Self::Unavailable => (Value::Null, "unavailable"),
+            Self::Invalid => (Value::Null, "invalid"),
+        };
+        result["suggested_filename"] = name;
+        result["suggested_filename_status"] = Value::String(status.to_owned());
+    }
+}
+
 enum DownloadEventOutcome {
-    Completed { guid: String },
-    Canceled { guid: String },
+    Completed {
+        guid: String,
+        suggested_filename: Option<SuggestedFilename>,
+    },
+    Canceled {
+        guid: String,
+    },
     EventStreamClosed,
 }
 
@@ -210,7 +257,9 @@ async fn await_download(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<super::cdp_ws::CdpEvent>,
     expected_frame_id: &str,
     observed_guid: &mut Option<String>,
+    metadata_requested: bool,
 ) -> DownloadEventOutcome {
+    let mut suggested_filename = None;
     while let Some(event) = events.recv().await {
         match event.method.as_str() {
             "Browser.downloadWillBegin" if observed_guid.is_none() => {
@@ -221,7 +270,13 @@ async fn await_download(
                     .params
                     .get("guid")
                     .and_then(Value::as_str)
+                    .filter(|guid| is_safe_guid(guid))
                     .map(str::to_owned);
+                if observed_guid.is_some() && metadata_requested {
+                    suggested_filename = Some(SuggestedFilename::from_event(
+                        event.params.get("suggestedFilename"),
+                    ));
+                }
             }
             "Browser.downloadProgress" => {
                 let Some(guid) = observed_guid.as_deref() else {
@@ -234,6 +289,7 @@ async fn await_download(
                     Some("completed") => {
                         return DownloadEventOutcome::Completed {
                             guid: guid.to_owned(),
+                            suggested_filename,
                         }
                     }
                     Some("canceled") => {
@@ -248,6 +304,23 @@ async fn await_download(
         }
     }
     DownloadEventOutcome::EventStreamClosed
+}
+
+fn completed_download_result(
+    root: &Path,
+    guid: &str,
+    suggested_filename: Option<SuggestedFilename>,
+) -> ToolResult {
+    match completed_download_size(root, guid) {
+        Ok(bytes) => {
+            let mut result = json!({ "status": "completed", "download_id": guid, "bytes": bytes });
+            if let Some(filename) = suggested_filename {
+                filename.append_to(&mut result);
+            }
+            ToolResult::text("browser download completed").with_structured(result)
+        }
+        Err(refusal) => refusal.to_tool_result(),
+    }
 }
 
 fn remove_proven_partial(root: &Path, guid: Option<&str>) {
@@ -300,6 +373,10 @@ impl Tool for BrowserDownloadTool {
         {
             return consent_required();
         }
+        let metadata_requested = args
+            .get(MCP_HOST_DOWNLOAD_METADATA_ARG)
+            .and_then(Value::as_bool)
+            == Some(true);
         let destination_root = match validate_destination_root(&destination_raw) {
             Ok(root) => root,
             Err(error) => return error,
@@ -461,20 +538,21 @@ impl Tool for BrowserDownloadTool {
         let mut observed_guid = None;
         let outcome = tokio::time::timeout(
             DOWNLOAD_TIMEOUT,
-            await_download(&mut events, &expected_frame_id, &mut observed_guid),
+            await_download(
+                &mut events,
+                &expected_frame_id,
+                &mut observed_guid,
+                metadata_requested,
+            ),
         )
         .await;
         reset_download_behavior(&validated.conn).await;
 
         match outcome {
-            Ok(DownloadEventOutcome::Completed { guid }) => {
-                match completed_download_size(&destination_root, &guid) {
-                    Ok(bytes) => ToolResult::text("browser download completed").with_structured(
-                        json!({ "status": "completed", "download_id": guid, "bytes": bytes }),
-                    ),
-                    Err(refusal) => refusal.to_tool_result(),
-                }
-            }
+            Ok(DownloadEventOutcome::Completed {
+                guid,
+                suggested_filename,
+            }) => completed_download_result(&destination_root, &guid, suggested_filename),
             Ok(DownloadEventOutcome::Canceled { guid }) => {
                 remove_proven_partial(&destination_root, Some(&guid));
                 BrowserRefusal::new(
@@ -506,6 +584,234 @@ impl Tool for BrowserDownloadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(method: &str, params: Value) -> super::super::cdp_ws::CdpEvent {
+        super::super::cdp_ws::CdpEvent {
+            method: method.to_owned(),
+            session_id: None,
+            params,
+        }
+    }
+
+    #[test]
+    fn suggested_filename_is_exact_bounded_leaf_metadata() {
+        for name in ["archive.zip", "材质包.zip", &"é".repeat(255)] {
+            assert_eq!(
+                SuggestedFilename::from_event(Some(&json!(name))),
+                SuggestedFilename::Provided(name.to_owned())
+            );
+        }
+        for name in [
+            "",
+            ".",
+            "..",
+            "../archive.zip",
+            "folder/archive.zip",
+            "folder\\archive.zip",
+            "C:archive.zip",
+            "bad\nname.zip",
+            "bad\0name.zip",
+            &"a".repeat(256),
+            &"é".repeat(513),
+        ] {
+            assert_eq!(
+                SuggestedFilename::from_event(Some(&json!(name))),
+                SuggestedFilename::Invalid,
+                "invalid source name {name:?}"
+            );
+        }
+        assert_eq!(
+            SuggestedFilename::from_event(None),
+            SuggestedFilename::Unavailable
+        );
+        assert_eq!(
+            SuggestedFilename::from_event(Some(&Value::Null)),
+            SuggestedFilename::Unavailable
+        );
+        assert_eq!(
+            SuggestedFilename::from_event(Some(&json!(42))),
+            SuggestedFilename::Invalid
+        );
+    }
+
+    #[test]
+    fn completion_metadata_requires_opt_in_and_a_proven_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::write(canonical.join("download-guid"), b"zip").unwrap();
+        let private = completed_download_result(&canonical, "download-guid", None);
+        assert_eq!(
+            private.structured_content,
+            Some(json!({
+                "status": "completed", "download_id": "download-guid", "bytes": 3
+            }))
+        );
+        for (metadata, name, status) in [
+            (
+                SuggestedFilename::Provided("source.zip".into()),
+                json!("source.zip"),
+                "provided",
+            ),
+            (SuggestedFilename::Unavailable, Value::Null, "unavailable"),
+            (SuggestedFilename::Invalid, Value::Null, "invalid"),
+        ] {
+            let result = completed_download_result(&canonical, "download-guid", Some(metadata));
+            let structured = result.structured_content.unwrap();
+            assert_eq!(structured["suggested_filename"], name);
+            assert_eq!(structured["suggested_filename_status"], status);
+            assert_eq!(structured["download_id"], "download-guid");
+            assert_eq!(structured["status"], "completed");
+        }
+        let refused = completed_download_result(
+            &canonical,
+            "missing-guid",
+            Some(SuggestedFilename::Provided("private-source.zip".into())),
+        );
+        let structured = refused.structured_content.as_ref().unwrap();
+        assert_eq!(structured["status"], "refused");
+        assert_eq!(structured["refusal"]["code"], "browser_action_unavailable");
+        let refused = serde_json::to_string(&refused).unwrap();
+        assert!(!refused.contains("suggested_filename"));
+        assert!(!refused.contains("private-source.zip"));
+    }
+
+    #[tokio::test]
+    async fn metadata_belongs_to_the_first_exact_frame_and_download_guid() {
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        for event in [
+            event(
+                "Browser.downloadWillBegin",
+                json!({"frameId":"foreign", "guid":"foreign", "suggestedFilename":"foreign.zip"}),
+            ),
+            event(
+                "Browser.downloadWillBegin",
+                json!({"frameId":"exact", "guid":"first", "suggestedFilename":"source.zip"}),
+            ),
+            event(
+                "Browser.downloadWillBegin",
+                json!({"frameId":"exact", "guid":"second", "suggestedFilename":"wrong.zip"}),
+            ),
+            event(
+                "Browser.downloadProgress",
+                json!({"guid":"second", "state":"completed"}),
+            ),
+            event(
+                "Browser.downloadProgress",
+                json!({"guid":"first", "state":"completed"}),
+            ),
+        ] {
+            tx.send(event).unwrap();
+        }
+        drop(tx);
+        let mut guid = None;
+        let outcome = await_download(&mut events, "exact", &mut guid, true).await;
+        match outcome {
+            DownloadEventOutcome::Completed {
+                guid,
+                suggested_filename,
+            } => {
+                assert_eq!(guid, "first");
+                assert_eq!(
+                    suggested_filename,
+                    Some(SuggestedFilename::Provided("source.zip".into()))
+                );
+            }
+            _ => panic!("expected the first exact-frame download to complete"),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_or_invalid_guid_cannot_contribute_filename_metadata() {
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        for guid in [Value::Null, json!(42), json!(""), json!("../escape")] {
+            tx.send(event(
+                "Browser.downloadWillBegin",
+                json!({"frameId":"exact", "guid":guid, "suggestedFilename":"wrong.zip"}),
+            ))
+            .unwrap();
+        }
+        tx.send(event(
+            "Browser.downloadWillBegin",
+            json!({"frameId":"exact", "guid":"first"}),
+        ))
+        .unwrap();
+        tx.send(event(
+            "Browser.downloadProgress",
+            json!({"guid":"first", "state":"completed"}),
+        ))
+        .unwrap();
+        let mut guid = None;
+        match await_download(&mut events, "exact", &mut guid, true).await {
+            DownloadEventOutcome::Completed {
+                guid,
+                suggested_filename,
+            } => {
+                assert_eq!(guid, "first");
+                assert_eq!(suggested_filename, Some(SuggestedFilename::Unavailable));
+            }
+            _ => panic!("expected the valid download identity to complete"),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_download_collection_does_not_retain_filename_metadata() {
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(event(
+            "Browser.downloadWillBegin",
+            json!({"frameId":"exact", "guid":"first", "suggestedFilename":"private-source.zip"}),
+        ))
+        .unwrap();
+        tx.send(event(
+            "Browser.downloadProgress",
+            json!({"guid":"first", "state":"completed"}),
+        ))
+        .unwrap();
+        let mut guid = None;
+        match await_download(&mut events, "exact", &mut guid, false).await {
+            DownloadEventOutcome::Completed {
+                suggested_filename, ..
+            } => assert_eq!(suggested_filename, None),
+            _ => panic!("expected download completion"),
+        }
+    }
+
+    #[tokio::test]
+    async fn canceled_closed_and_timed_out_downloads_return_no_filename_metadata() {
+        for canceled in [false, true] {
+            let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+            tx.send(event("Browser.downloadWillBegin", json!({"frameId":"exact", "guid":"first", "suggestedFilename":"private-source.zip"}))).unwrap();
+            if canceled {
+                tx.send(event(
+                    "Browser.downloadProgress",
+                    json!({"guid":"first", "state":"canceled"}),
+                ))
+                .unwrap();
+            }
+            drop(tx);
+            let mut guid = None;
+            let outcome = await_download(&mut events, "exact", &mut guid, true).await;
+            if canceled {
+                assert!(
+                    matches!(outcome, DownloadEventOutcome::Canceled { guid } if guid == "first")
+                );
+            } else {
+                assert!(matches!(outcome, DownloadEventOutcome::EventStreamClosed));
+            }
+        }
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(event(
+            "Browser.downloadWillBegin",
+            json!({"frameId":"exact", "guid":"first", "suggestedFilename":"private-source.zip"}),
+        ))
+        .unwrap();
+        let mut guid = None;
+        assert!(tokio::time::timeout(
+            Duration::from_millis(5),
+            await_download(&mut events, "exact", &mut guid, true)
+        )
+        .await
+        .is_err());
+    }
 
     #[test]
     fn destination_must_be_absolute_existing_canonical_directory() {
