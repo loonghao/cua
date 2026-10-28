@@ -46,7 +46,7 @@ impl BrowserDownloadTool {
         Self {
             def: ToolDef {
                 name: "browser_download".into(),
-                description: "Trigger one download through an exact live browser ref and save it inside an explicitly approved directory. Requires MCP-host destructive-tool approval, refuses ambiguous or stale capabilities, and never returns the source URL, filename, or destination path.".into(),
+                description: "Trigger one download through an exact live browser ref and save it inside an explicitly approved directory. Requires MCP-host destructive-tool approval, refuses ambiguous or stale capabilities, and never returns the source URL or destination path. A trusted host may explicitly request a bounded suggested filename; ordinary calls omit that metadata.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {

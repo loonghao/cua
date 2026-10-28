@@ -42,7 +42,7 @@ struct NativeConsentActionEvidence {
 fn select_unique_target_owned_topmost(
     actions: &[NativeConsentActionEvidence],
 ) -> Result<usize, BrowserRefusal> {
-    if actions.len() < 2
+    if actions.is_empty()
         || actions.iter().any(|action| {
             action.prompt_hwnd == 0
                 || !action.same_pid
@@ -55,7 +55,7 @@ fn select_unique_target_owned_topmost(
     {
         return Err(refusal(
             BrowserRefusalCode::BrowserWrongTargetRefused,
-            "multiple native Chromium consent actions lacked complete target-owned window proof",
+            "native Chromium consent actions lacked complete target-owned window proof",
         ));
     }
 
@@ -1048,6 +1048,26 @@ mod tests {
 
         assert_eq!(
             exact_allow_button_with(&nodes, properties)
+                .unwrap_err()
+                .code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+    }
+
+    #[test]
+    fn matcher_accepts_one_complete_target_owned_prompt_and_refuses_empty() {
+        assert_eq!(
+            select_unique_target_owned_topmost(&[native_action(112, 12787906, Some(4))]).unwrap(),
+            112
+        );
+        assert_eq!(
+            select_unique_target_owned_topmost(&[]).unwrap_err().code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+        let mut incomplete = native_action(112, 12787906, Some(4));
+        incomplete.owner_reaches_target = false;
+        assert_eq!(
+            select_unique_target_owned_topmost(&[incomplete])
                 .unwrap_err()
                 .code,
             BrowserRefusalCode::BrowserWrongTargetRefused

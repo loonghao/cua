@@ -1016,6 +1016,18 @@ fn needs_debugging_restore(
     confirmed_enabled || (attempted && initial == Some(CheckboxState::Off))
 }
 
+fn revalidate_rollback_context<T>(
+    window: impl FnOnce() -> Result<(), BrowserRefusal>,
+    owned_tab: Option<&T>,
+    tab: impl FnOnce(&T) -> Result<(), BrowserRefusal>,
+) -> Result<(), BrowserRefusal> {
+    window()?;
+    if let Some(owned) = owned_tab {
+        tab(owned)?;
+    }
+    Ok(())
+}
+
 unsafe fn checkbox_state(element_ptr: usize) -> Result<CheckboxState, BrowserRefusal> {
     let element = IUIAutomationElement::from_raw(element_ptr as *mut _);
     let result = element
@@ -1068,6 +1080,13 @@ pub struct SetupUiHandle {
 }
 
 impl SetupUiHandle {
+    fn revalidate_rollback_context(&self) -> Result<(), BrowserRefusal> {
+        revalidate_rollback_context(
+            || self.window_identity.revalidate(),
+            self.owned_tab.as_ref(),
+            |owned| owned.active(self.window_identity),
+        )
+    }
     fn rollback_remote_debugging(&mut self) -> bool {
         if !needs_debugging_restore(
             self.enabled_remote_debugging,
@@ -1085,17 +1104,14 @@ impl SetupUiHandle {
         if self.initial_debugging_state != Some(CheckboxState::Off) {
             return false;
         }
-        let Some(owned) = self.owned_tab.as_ref() else {
-            return false;
-        };
-        if owned.active(self.window_identity).is_err() {
+        if self.revalidate_rollback_context().is_err() {
             return false;
         }
         let tree = crate::uia::walk_tree(self.hwnd, None);
         let checkbox = exact_setup_checkbox(&tree.nodes, self.descriptor);
         let observed = match checkbox {
             Ok(Some(element)) => unsafe {
-                if owned.active(self.window_identity).is_err() {
+                if self.revalidate_rollback_context().is_err() {
                     None
                 } else {
                     match checkbox_state(element) {
@@ -1109,10 +1125,13 @@ impl SetupUiHandle {
         };
         release_nodes(&tree.nodes);
         if observed == Some(true) {
+            if self.revalidate_rollback_context().is_err() {
+                return false;
+            }
             self.enabled_remote_debugging = false;
             return true;
         }
-        if observed.is_none() || owned.active(self.window_identity).is_err() {
+        if observed.is_none() || self.revalidate_rollback_context().is_err() {
             return false;
         }
         let readback = crate::uia::walk_tree(self.hwnd, None);
@@ -1121,7 +1140,7 @@ impl SetupUiHandle {
                 checkbox.is_some_and(|element| unsafe {
                     matches!(checkbox_state(element), Ok(CheckboxState::Off))
                 })
-            }) && owned.active(self.window_identity).is_ok();
+            }) && self.revalidate_rollback_context().is_ok();
         release_nodes(&readback.nodes);
         if restored {
             self.enabled_remote_debugging = false;
@@ -1576,6 +1595,57 @@ mod tests {
         existing_profile_setup_descriptor(BrowserProduct::GoogleChrome).unwrap()
     }
 
+    #[test]
+    fn existing_setup_page_rollback_requires_window_identity_without_an_owned_tab() {
+        let checks = std::cell::Cell::new(0);
+        assert!(revalidate_rollback_context(
+            || {
+                checks.set(checks.get() + 1);
+                Ok(())
+            },
+            None::<&()>,
+            |_| panic!("an existing page has no driver-created tab"),
+        )
+        .is_ok());
+        assert_eq!(checks.get(), 1);
+        assert!(revalidate_rollback_context(
+            || Err(refusal(
+                BrowserRefusalCode::BrowserBindingStale,
+                "window changed"
+            )),
+            None::<&()>,
+            |_| panic!("window failure must stop tab validation"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn created_setup_tab_rollback_still_requires_live_owned_identity() {
+        let checks = std::cell::Cell::new(0);
+        assert!(revalidate_rollback_context(
+            || {
+                checks.set(1);
+                Ok(())
+            },
+            Some(&()),
+            |_| {
+                assert_eq!(checks.get(), 1);
+                checks.set(2);
+                Ok(())
+            },
+        )
+        .is_ok());
+        assert_eq!(checks.get(), 2);
+        assert!(revalidate_rollback_context(
+            || Ok(()),
+            Some(&()),
+            |_| Err(refusal(
+                BrowserRefusalCode::BrowserBindingStale,
+                "owned tab changed"
+            )),
+        )
+        .is_err());
+    }
     #[test]
     fn failed_toggle_that_changed_state_still_requires_proven_rollback() {
         let mut attempted = false;
