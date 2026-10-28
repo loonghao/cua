@@ -717,9 +717,27 @@ Effect: mutating. Platforms: macOS, Linux, Windows.
 
 ### `browser_download`
 
+Effect: destructive. Platforms: macOS, Linux, Windows.
+
+<Tabs items={['macOS', 'Linux', 'Windows']} groupId="platform" persist>
+<Tab value="macOS">
+
 Trigger one download through an exact live browser ref and save it inside an explicitly approved directory. Requires MCP-host destructive-tool approval, refuses ambiguous or stale capabilities, and never returns the source URL, filename, or destination path.
 
-Effect: destructive. Platforms: macOS, Linux, Windows.
+</Tab>
+<Tab value="Linux">
+
+Trigger one download through an exact live browser ref and save it inside an explicitly approved directory. Requires MCP-host destructive-tool approval, refuses ambiguous or stale capabilities, and never returns the source URL, filename, or destination path.
+
+</Tab>
+<Tab value="Windows">
+
+Trigger one download through an exact live browser ref and save it inside an explicitly approved directory. Requires MCP-host destructive-tool approval, refuses ambiguous or stale capabilities, and never returns the source URL or destination path. A trusted host may explicitly request a bounded suggested filename; ordinary calls omit that metadata.
+
+</Tab>
+</Tabs>
+
+**Parameters on every platform**
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |

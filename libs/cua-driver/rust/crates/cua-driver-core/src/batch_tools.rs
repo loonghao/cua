@@ -487,15 +487,13 @@ impl Plan {
                 break;
             };
             match tool {
-                OBSERVE_TOOL | "screenshot" => {
+                OBSERVE_TOOL | "screenshot" if trailing_observe.is_none() => {
                     // The latest trailing read wins; earlier ones are dropped.
-                    if trailing_observe.is_none() {
-                        let mut args = args;
-                        if tool == "screenshot" {
-                            args = json!({ "include_screenshot": true });
-                        }
-                        trailing_observe = Some(args);
+                    let mut args = args;
+                    if tool == "screenshot" {
+                        args = json!({ "include_screenshot": true });
                     }
+                    trailing_observe = Some(args);
                 }
                 "zoom" => tail_reads.insert(0, ("zoom", args)),
                 // Other reads at the end (list_windows, verify_state, ...)
