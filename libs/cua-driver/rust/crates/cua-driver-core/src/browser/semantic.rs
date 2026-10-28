@@ -76,6 +76,7 @@ impl Rect {
 
 #[derive(Debug, Clone, Default)]
 struct DomMeta {
+    node_type: i64,
     tag: String,
     attrs: HashMap<String, String>,
     order: usize,
@@ -917,6 +918,7 @@ pub(crate) fn build_dom_index(root: &Value) -> DomIndex {
             index.nodes.insert(
                 backend,
                 DomMeta {
+                    node_type,
                     tag,
                     attrs,
                     order: *order,
@@ -1311,7 +1313,8 @@ fn supplement_dom_actions(
     let mut candidates = dom.nodes.iter().collect::<Vec<_>>();
     candidates.sort_by_key(|(_, meta)| meta.order);
     for (&backend_node_id, meta) in candidates {
-        if existing.contains(&backend_node_id)
+        if meta.node_type != 1
+            || existing.contains(&backend_node_id)
             || expected_frame.is_some_and(|expected| meta.frame_id.as_deref() != Some(expected))
         {
             continue;
@@ -1351,7 +1354,9 @@ fn supplement_dom_actions(
         let mut actions = action_kinds(&role, Some(meta), &states, layout_meta);
         let upload_backend_node_id = if actions.contains(&BrowserActionKind::Upload) {
             Some(backend_node_id)
-        } else if semantic_action_disabled(&states, Some(meta)) {
+        } else if semantic_action_disabled(&states, Some(meta))
+            || (meta.tag != "label" && !meta.attrs.contains_key("aria-controls"))
+        {
             None
         } else {
             dom.unique_associated_file_input(backend_node_id)
@@ -1956,6 +1961,7 @@ mod tests {
     #[test]
     fn file_inputs_expose_upload_instead_of_text_typing() {
         let dom = DomMeta {
+            node_type: 1,
             tag: "input".into(),
             attrs: HashMap::from([("type".into(), "file".into())]),
             order: 0,
@@ -1969,6 +1975,57 @@ mod tests {
             action_kinds("textbox", Some(&dom), &BTreeMap::new(), None),
             vec![BrowserActionKind::Upload]
         );
+    }
+
+    #[test]
+    fn dom_upload_supplement_uses_explicit_chooser_sources_only() {
+        let dom = build_dom_index(&json!({
+            "nodeType": 9,
+            "frameId": "F_MAIN",
+            "children": [
+                {
+                    "nodeType": 1, "nodeName": "LABEL", "backendNodeId": 10,
+                    "attributes": ["for", "upload"],
+                    "children": [{
+                        "nodeType": 1, "nodeName": "SPAN", "backendNodeId": 11,
+                        "children": [{"nodeType": 3, "nodeName": "#text", "backendNodeId": 12}]
+                    }]
+                },
+                {
+                    "nodeType": 1, "nodeName": "BUTTON", "backendNodeId": 20,
+                    "attributes": ["aria-controls", "upload"]
+                },
+                {
+                    "nodeType": 3, "nodeName": "#text", "backendNodeId": 22,
+                    "attributes": ["aria-controls", "upload"]
+                },
+                {
+                    "nodeType": 1, "nodeName": "BUTTON", "backendNodeId": 21,
+                    "attributes": ["aria-controls", "upload", "aria-disabled", "true"]
+                },
+                {
+                    "nodeType": 1, "nodeName": "INPUT", "backendNodeId": 30,
+                    "attributes": ["id", "upload", "type", "file", "style", "display:none"]
+                }
+            ]
+        }));
+        let viewport = parse_viewport(&json!({
+            "cssVisualViewport": {"pageX": 0, "pageY": 0, "clientWidth": 800, "clientHeight": 600}
+        }));
+        let document = compose_accessibility_tree(
+            &json!({"nodes": []}),
+            &dom,
+            &LayoutIndex::default(),
+            &viewport,
+            frame(),
+        );
+        let upload_sources = document
+            .nodes
+            .iter()
+            .filter(|node| node.actions.contains(&BrowserActionKind::Upload))
+            .map(|node| node.backend_node_id.expect("supplement has a DOM identity"))
+            .collect::<Vec<_>>();
+        assert_eq!(upload_sources, vec![10, 20]);
     }
 
     #[test]
