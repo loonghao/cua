@@ -55,3 +55,8 @@ presence of a Host and a client-owned MCP bridge is not evidence of a process
 leak. Runtime acceptance requires the original owner's exact process and window
 binding; source tests cannot establish OS process reaping, browser native-host
 acceptance, or an absence of visible console flashes.
+
+The final navigation review also identified URL normalization in same-document
+readback: requested and committed URLs now compare as parsed URLs when valid,
+with exact raw equality on parse failure. The DOM URL, frame, loader and visible
+readback fences remain exact; different fragments, paths or hosts still fail.
