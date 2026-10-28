@@ -139,6 +139,24 @@ impl Drop for SetupMtaUsage {
 struct RetainedSetup<T, U> {
     owned_tab: Option<T>,
     _mta_usage: U,
+    new_tab_action_attempted: bool,
+    opened_setup_page: bool,
+}
+
+impl<T, U> RetainedSetup<T, U> {
+    fn new(mta_usage: U) -> Self {
+        Self {
+            owned_tab: None,
+            _mta_usage: mta_usage,
+            new_tab_action_attempted: false,
+            opened_setup_page: false,
+        }
+    }
+
+    fn record_owned_tab(&mut self, tab: T) {
+        self.owned_tab = Some(tab);
+        self.opened_setup_page = true;
+    }
 }
 
 /// UIA IDs are opaque and may be reused after an element dies. They identify
@@ -1114,9 +1132,7 @@ pub struct SetupUiHandle {
     hwnd: u64,
     window_identity: SetupWindowIdentity,
     ownership: RetainedSetup<OwnedSetupTab, SetupMtaUsage>,
-    new_tab_action_attempted: bool,
     descriptor: &'static BrowserSetupDescriptor,
-    pub opened_setup_page: bool,
     pub enabled_remote_debugging: bool,
     pub focused_setup_address_field: bool,
     pub foregrounded_window: bool,
@@ -1126,6 +1142,10 @@ pub struct SetupUiHandle {
 }
 
 impl SetupUiHandle {
+    pub fn opened_setup_page(&self) -> bool {
+        self.ownership.opened_setup_page
+    }
+
     fn revalidate_rollback_context(&self) -> Result<(), BrowserRefusal> {
         revalidate_rollback_context(
             || self.window_identity.revalidate(),
@@ -1215,7 +1235,7 @@ impl SetupUiHandle {
     ) -> BrowserRefusal {
         let enabled_remote_debugging = self.enabled_remote_debugging;
         let restored_remote_debugging = self.rollback_remote_debugging();
-        let opened_setup_page = self.opened_setup_page;
+        let opened_setup_page = self.ownership.opened_setup_page;
         let focused_setup_address_field = self.focused_setup_address_field;
         let foregrounded_window = self.foregrounded_window;
         let injected_global_input = self.injected_global_input;
@@ -1224,7 +1244,7 @@ impl SetupUiHandle {
         let cleanup_status = match &cleanup {
             Ok(Some(true)) => "verified_closed",
             Ok(Some(false)) => "unconfirmed",
-            Ok(None) if self.new_tab_action_attempted => "creation_unproven",
+            Ok(None) if self.ownership.new_tab_action_attempted => "creation_unproven",
             Ok(None) => "not_opened",
             Err(_) => "refused",
         };
@@ -1242,7 +1262,7 @@ impl SetupUiHandle {
                 "restored_remote_debugging": restored_remote_debugging,
                 "remote_debugging_restore_unconfirmed": self.enable_attempted && self.initial_debugging_state == Some(CheckboxState::Off) && !restored_remote_debugging,
                 "owned_setup_tab_identified": self.ownership.owned_tab.is_some(),
-                "setup_tab_creation_unproven": self.new_tab_action_attempted && !opened_setup_page && self.ownership.owned_tab.is_none(),
+                "setup_tab_creation_unproven": self.ownership.new_tab_action_attempted && !opened_setup_page && self.ownership.owned_tab.is_none(),
                 "setup_tab_cleanup_status": cleanup_status,
                 "setup_tab_cleanup_refusal": cleanup_refusal,
             },
@@ -1270,7 +1290,7 @@ impl SetupUiHandle {
     }
 
     fn close_owned_tab(&mut self) -> Result<Option<bool>, BrowserRefusal> {
-        if !self.opened_setup_page {
+        if !self.ownership.opened_setup_page {
             return Ok(None);
         }
         let owned =
@@ -1280,7 +1300,7 @@ impl SetupUiHandle {
             })?;
         let closed = owned.close(self.window_identity)?;
         if closed {
-            self.opened_setup_page = false;
+            self.ownership.opened_setup_page = false;
         }
         Ok(Some(closed))
     }
@@ -1358,13 +1378,8 @@ fn set_remote_debugging(
         Ok(Some(_)) => SetupUiHandle {
             hwnd,
             window_identity,
-            ownership: RetainedSetup {
-                owned_tab: None,
-                _mta_usage: mta_usage,
-            },
-            new_tab_action_attempted: false,
+            ownership: RetainedSetup::new(mta_usage),
             descriptor,
-            opened_setup_page: false,
             enabled_remote_debugging: false,
             focused_setup_address_field: false,
             foregrounded_window: false,
@@ -1378,13 +1393,8 @@ fn set_remote_debugging(
             let mut handle = SetupUiHandle {
                 hwnd,
                 window_identity,
-                ownership: RetainedSetup {
-                    owned_tab: None,
-                    _mta_usage: mta_usage,
-                },
-                new_tab_action_attempted: false,
+                ownership: RetainedSetup::new(mta_usage),
                 descriptor,
-                opened_setup_page: false,
                 enabled_remote_debugging: false,
                 focused_setup_address_field: false,
                 foregrounded_window: false,
@@ -1448,7 +1458,7 @@ fn set_remote_debugging(
                 release_nodes(&tab_tree);
                 return Err(handle.abort(error));
             }
-            handle.new_tab_action_attempted = true;
+            handle.ownership.new_tab_action_attempted = true;
             let invocation = unsafe { invoke(new_tab_button, "native new-tab button") };
             release_nodes(&tab_tree);
             // A failed Invoke can have an unknown side effect. It cannot
@@ -1456,8 +1466,6 @@ fn set_remote_debugging(
             if let Err(error) = invocation {
                 return Err(handle.abort(error));
             }
-            handle.opened_setup_page = true;
-
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut created = loop {
                 let tree = match native_nodes(hwnd) {
@@ -1479,8 +1487,7 @@ fn set_remote_debugging(
                         let owned = OwnedSetupTab::capture(&tree, index, owned_window);
                         match owned {
                             Ok(owned) => {
-                                handle.ownership.owned_tab = Some(owned);
-                                handle.opened_setup_page = true;
+                                handle.ownership.record_owned_tab(owned);
                                 break tree;
                             }
                             Err(error) => {
@@ -1579,7 +1586,7 @@ fn set_remote_debugging(
             return Err(error);
         }
     };
-    if !handle.opened_setup_page {
+    if !handle.ownership.opened_setup_page {
         release_nodes(&initial);
     }
 
@@ -1711,10 +1718,8 @@ mod tests {
         assert_send::<SetupUiHandle>();
 
         let events = Arc::new(Mutex::new(Vec::new()));
-        let retained = RetainedSetup {
-            owned_tab: Some(Tracked("tab", events.clone())),
-            _mta_usage: Tracked("mta", events.clone()),
-        };
+        let mut retained = RetainedSetup::new(Tracked("mta", events.clone()));
+        retained.record_owned_tab(Tracked("tab", events.clone()));
         std::thread::spawn(move || drop(retained)).join().unwrap();
         assert_eq!(*events.lock().unwrap(), ["tab", "mta"]);
     }
@@ -1731,10 +1736,8 @@ mod tests {
         }
 
         let events = Arc::new(Mutex::new(Vec::new()));
-        let retained = RetainedSetup {
-            owned_tab: Some(Tracked("tab", events.clone())),
-            _mta_usage: Tracked("mta", events.clone()),
-        };
+        let mut retained = RetainedSetup::new(Tracked("mta", events.clone()));
+        retained.record_owned_tab(Tracked("tab", events.clone()));
         let result = with_cleanup_scope(
             retained,
             || Err::<(), _>("COM unavailable"),
@@ -1742,6 +1745,18 @@ mod tests {
         );
         assert_eq!(result, Err("COM unavailable"));
         assert_eq!(*events.lock().unwrap(), ["tab", "mta"]);
+    }
+
+    #[test]
+    fn setup_tab_is_unproven_until_owned_identity_is_captured() {
+        let mut retained = RetainedSetup::<(), _>::new(());
+        retained.new_tab_action_attempted = true;
+        assert!(!retained.opened_setup_page);
+        assert!(retained.owned_tab.is_none());
+
+        retained.record_owned_tab(());
+        assert!(retained.opened_setup_page);
+        assert!(retained.owned_tab.is_some());
     }
 
     fn descriptor() -> &'static BrowserSetupDescriptor {

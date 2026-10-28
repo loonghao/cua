@@ -66,3 +66,8 @@ they own agile UIA identities. The creating thread keeps its own COM scope
 local; consuming cleanup releases identities before the MTA cookie, including
 when cleanup scope initialization refuses. Cross-thread ordering is covered by
 pure tests; actual Windows COM and browser behavior require native validation.
+
+A successful new-tab invocation is only an attempted side effect. The setup
+receipt marks an opened page only after the native tab ownership identity has
+been captured; an incomplete proof reports creation as unproven and cannot
+close an unowned tab.

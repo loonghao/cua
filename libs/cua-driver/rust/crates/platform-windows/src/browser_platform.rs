@@ -2423,7 +2423,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                         ),
                     )
                 })??;
-        let opened_setup_page = handle.opened_setup_page;
+        let opened_setup_page = handle.opened_setup_page();
         let enabled_remote_debugging = handle.enabled_remote_debugging;
         let setup_was_already_enabled = !enabled_remote_debugging;
         let focused_setup_address_field = handle.focused_setup_address_field;
