@@ -28,6 +28,18 @@ it does not install or replace a running Driver or DCC-CUA provider.
 - Preserve bounded helper console suppression, owned setup-tab cleanup,
   responsive shared-socket release and opt-in download source metadata.
 
+Foreground navigation success still requires the exact document to report
+`visibility_state="visible"`; a present `hidden` value does not establish the
+foreground readback contract. Frame, loader and URL proofs remain fenced around
+the DOM read. Consuming setup cleanup keeps its owned-tab proof available for
+failure rollback and drops the complete handle before its outer COM scope ends,
+including cleanup error and unwind paths.
+
+The SDK manifest explicitly binds its workspace root. This prevents downstream
+Git-source discovery through standalone compatibility fixtures from skipping
+workspace-inherited SDK metadata. A source pin is qualified only after the real
+consumer resolves all ten SDK packages to the same immutable revision.
+
 ## Validation and limits
 
 Run exact browser mock and semantic/download tests, pure Windows launch-selection

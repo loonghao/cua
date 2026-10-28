@@ -1064,6 +1064,19 @@ unsafe fn toggle(element_ptr: usize) -> Result<(), BrowserRefusal> {
     })
 }
 
+fn with_cleanup_scope<T, S, R, E>(
+    value: T,
+    scope: impl FnOnce() -> Result<S, E>,
+    cleanup: impl FnOnce(&mut T) -> R,
+) -> Result<R, E> {
+    let _scope = scope()?;
+    // Declare the owned value after the guard so unwinding preserves this order too.
+    let mut value = value;
+    let result = cleanup(&mut value);
+    drop(value);
+    Ok(result)
+}
+
 pub struct SetupUiHandle {
     hwnd: u64,
     window_identity: SetupWindowIdentity,
@@ -1148,8 +1161,18 @@ impl SetupUiHandle {
         restored
     }
 
-    pub fn abort(mut self, error: BrowserRefusal) -> BrowserRefusal {
-        self.abort_with_cleanup(error, None)
+    pub fn abort(self, error: BrowserRefusal) -> BrowserRefusal {
+        let mut original = error.clone();
+        with_cleanup_scope(self, SetupComScope::new, |handle| {
+            handle.abort_with_cleanup(error, None)
+        })
+        .unwrap_or_else(|cleanup_error| {
+            let cause = original.detail.take();
+            original.with_detail(serde_json::json!({
+                "cause": cause,
+                "setup_cleanup_refusal": cleanup_error.message,
+            }))
+        })
     }
 
     fn abort_with_cleanup(
@@ -1194,21 +1217,23 @@ impl SetupUiHandle {
         }))
     }
 
-    pub fn close_for_success(mut self) -> Result<Option<bool>, BrowserRefusal> {
-        match self.close_owned_tab() {
-            Ok(Some(false)) => Err(self.abort_with_cleanup(
-                refusal(
-                    BrowserRefusalCode::BrowserBindingStale,
-                    "the owned native setup tab did not disappear in a complete readback",
-                ),
-                Some(Ok(Some(false))),
-            )),
-            Err(error) => {
-                let cleanup_error = error.clone();
-                Err(self.abort_with_cleanup(error, Some(Err(cleanup_error))))
+    pub fn close_for_success(self) -> Result<Option<bool>, BrowserRefusal> {
+        with_cleanup_scope(self, SetupComScope::new, |handle| {
+            match handle.close_owned_tab() {
+                Ok(Some(false)) => Err(handle.abort_with_cleanup(
+                    refusal(
+                        BrowserRefusalCode::BrowserBindingStale,
+                        "the owned native setup tab did not disappear in a complete readback",
+                    ),
+                    Some(Ok(Some(false))),
+                )),
+                Err(error) => {
+                    let cleanup_error = error.clone();
+                    Err(handle.abort_with_cleanup(error, Some(Err(cleanup_error))))
+                }
+                result => result,
             }
-            result => result,
-        }
+        })?
     }
 
     fn close_owned_tab(&mut self) -> Result<Option<bool>, BrowserRefusal> {
@@ -1227,8 +1252,11 @@ impl SetupUiHandle {
         Ok(Some(closed))
     }
 
-    pub fn close(mut self) -> Option<bool> {
-        self.close_owned_tab().unwrap_or(Some(false))
+    pub fn close(self) -> Option<bool> {
+        with_cleanup_scope(self, SetupComScope::new, |handle| {
+            handle.close_owned_tab().unwrap_or(Some(false))
+        })
+        .unwrap_or(Some(false))
     }
 }
 
@@ -1591,6 +1619,43 @@ mod tests {
     use super::*;
     use cua_driver_core::browser::{existing_profile_setup_descriptor, BrowserProduct};
 
+    #[test]
+    fn owned_cleanup_values_drop_before_scope_on_success_error_and_unwind() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        struct Tracked(&'static str, Rc<RefCell<Vec<&'static str>>>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.1.borrow_mut().push(self.0);
+            }
+        }
+        for mode in 0..3 {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let owned = Tracked("owned", events.clone());
+            let scope_events = events.clone();
+            let cleanup_events = events.clone();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_cleanup_scope(
+                    owned,
+                    || Ok::<_, ()>(Tracked("scope", scope_events)),
+                    |_| {
+                        cleanup_events.borrow_mut().push("cleanup");
+                        match mode {
+                            0 => Ok(()),
+                            1 => Err(()),
+                            _ => panic!("simulated cleanup unwind"),
+                        }
+                    },
+                )
+            }));
+            match mode {
+                0 => assert_eq!(outcome.unwrap(), Ok(Ok(()))),
+                1 => assert_eq!(outcome.unwrap(), Ok(Err(()))),
+                _ => assert!(outcome.is_err()),
+            }
+            assert_eq!(*events.borrow(), ["cleanup", "owned", "scope"]);
+        }
+    }
     fn descriptor() -> &'static BrowserSetupDescriptor {
         existing_profile_setup_descriptor(BrowserProduct::GoogleChrome).unwrap()
     }
