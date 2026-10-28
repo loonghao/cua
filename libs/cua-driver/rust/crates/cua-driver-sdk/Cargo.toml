@@ -1,5 +1,6 @@
 [package]
 name = "cua-driver-sdk"
+workspace = "../.."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
