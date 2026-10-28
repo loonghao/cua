@@ -89,6 +89,7 @@ pub(super) struct FixtureState {
     readback_fails: bool,
     readback_never_settles: bool,
     readback_reloads_document: bool,
+    readback_changes_fragment: bool,
     target_present: bool,
     drift_after_readback: bool,
     dom_click_changes_readback: bool,
@@ -142,6 +143,7 @@ impl Default for FixtureState {
             readback_fails: false,
             readback_never_settles: false,
             readback_reloads_document: false,
+            readback_changes_fragment: false,
             target_present: true,
             drift_after_readback: false,
             select_outcome: Value::Null,
@@ -760,13 +762,24 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 st.tab_sessions += 1;
                 MockReply::ok(json!({ "sessionId": format!("tab-sess-{}", st.tab_sessions) }))
             }
-            "Page.getFrameTree" if is_tab => MockReply::ok(json!({
+            "Page.getFrameTree" if is_tab => {
+                let (url, fragment) = st
+                    .main_url
+                    .split_once('#')
+                    .map_or((st.main_url.as_str(), None), |(url, fragment)| {
+                        (url, Some(format!("#{fragment}")))
+                    });
+                let mut frame = json!({
+                    "id": "F_MAIN",
+                    "loaderId": st.main_loader.clone(),
+                    "url": url,
+                });
+                if let Some(fragment) = fragment {
+                    frame["urlFragment"] = json!(fragment);
+                }
+                MockReply::ok(json!({
                 "frameTree": {
-                    "frame": {
-                        "id": "F_MAIN",
-                        "loaderId": st.main_loader.clone(),
-                        "url": st.main_url.clone(),
-                    },
+                    "frame": frame,
                     "childFrames": [{
                         "frame": {
                             "id": "F_IFRAME",
@@ -776,7 +789,8 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                         }
                     }]
                 }
-            })),
+                }))
+            }
             "Page.getFrameTree" if is_oopif => MockReply::ok(json!({
                 "frameTree": {
                     "frame": {
@@ -965,11 +979,20 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 if st.drift_after_readback {
                     st.target_present = false;
                 }
+                let current_url = st
+                    .navigation_readback_url
+                    .as_deref()
+                    .unwrap_or(&st.main_url)
+                    .to_owned();
+                if st.readback_changes_fragment {
+                    let url = st.main_url.split('#').next().unwrap_or_default();
+                    st.main_url = format!("{url}#changed");
+                }
                 MockReply::ok(json!({
                     "result": {
                         "type": "string",
                         "value": serde_json::to_string(&json!({
-                            "current_url": st.navigation_readback_url.as_deref().unwrap_or(&st.main_url),
+                            "current_url": current_url,
                             "title": "Foreground fixture",
                             "heading": "Activated tab",
                             "visibility_state": visible,
@@ -2996,6 +3019,38 @@ async fn foreground_navigation_activates_the_exact_tab_and_returns_readback() {
     assert!(structured["title"].is_string(), "{structured}");
     assert!(structured["heading"].is_string(), "{structured}");
     assert_eq!(recorded_calls(&f, "Target.activateTarget").len(), 1);
+}
+
+#[tokio::test]
+async fn foreground_navigation_preserves_fragment_and_fences_fragment_changes() {
+    for changes_after_readback in [false, true] {
+        let f =
+            fixture_with(|state| state.readback_changes_fragment = changes_after_readback).await;
+        let (target, tab) = bind(&f).await;
+        let result = BrowserNavigateTool::new(f.engine.clone())
+            .invoke(json!({
+                "target_id": target,
+                "tab_id": tab,
+                "url": "https://fixture.test/fragment#section",
+                "delivery_mode": "foreground",
+                "session": SESSION,
+            }))
+            .await;
+        let receipt = result
+            .structured_content
+            .as_ref()
+            .expect("navigation receipt");
+        if changes_after_readback {
+            assert_eq!(result.is_error, Some(true), "{receipt}");
+            assert_eq!(receipt["readback_state"], "stale_document", "{receipt}");
+        } else {
+            assert_eq!(result.is_error, None, "{receipt}");
+            assert_eq!(
+                receipt["current_url"],
+                "https://fixture.test/fragment#section"
+            );
+        }
+    }
 }
 
 #[tokio::test]

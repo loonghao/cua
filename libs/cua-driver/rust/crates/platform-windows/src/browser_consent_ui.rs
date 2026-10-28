@@ -686,6 +686,19 @@ pub fn dismiss(pid: u32, hwnd: u64) -> Result<bool, BrowserRefusal> {
     }
 }
 
+async fn inspect_consent_blocking<F, T>(inspect: F) -> Result<T, BrowserRefusal>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(inspect).await.map_err(|error| {
+        refusal(
+            BrowserRefusalCode::BrowserRouteUnavailable,
+            format!("could not inspect the browser consent UI: {error}"),
+        )
+    })
+}
+
 pub async fn handle(
     request: BrowserConsentRequest,
 ) -> Result<BrowserConsentOutcome, BrowserRefusal> {
@@ -701,19 +714,15 @@ pub async fn handle(
     loop {
         prove_window_owner(request.window_id, pid)?;
         let hwnd = request.window_id;
-        let tree = tokio::task::spawn_blocking(move || {
-            ConsentNodes(crate::uia::walk_tree(hwnd, None).nodes)
+        let (tree, prompt_present, selection) = inspect_consent_blocking(move || {
+            let tree = ConsentNodes(crate::uia::walk_tree(hwnd, None).nodes);
+            let prompt_present = native_prompt_surface_present(&tree.0);
+            let selection = exact_allow_button_for_target(&tree.0, pid, hwnd);
+            (tree, prompt_present, selection)
         })
-        .await
-        .map_err(|error| {
-            refusal(
-                BrowserRefusalCode::BrowserRouteUnavailable,
-                format!("could not inspect the browser consent UI: {error}"),
-            )
-        })?;
-        let prompt_present = native_prompt_surface_present(&tree.0);
+        .await?;
         saw_prompt |= prompt_present;
-        match exact_allow_button_for_target(&tree.0, pid, request.window_id) {
+        match selection {
             Ok(Some(selection)) => {
                 let invoked = request
                     .action
@@ -751,6 +760,31 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn consent_inspection_does_not_block_the_async_executor() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(inspect_consent_blocking(move || {
+            let _ = started_tx.send(());
+            release_rx.recv_timeout(Duration::from_secs(3)).is_ok()
+        }));
+        started_rx.await.expect("inspection started");
+        assert!(!task.is_finished(), "inspection blocked the executor");
+        release_tx.send(()).expect("release inspection");
+        assert!(task
+            .await
+            .expect("task completed")
+            .expect("inspection completed"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn consent_inspection_join_failure_is_a_route_refusal() {
+        let error = inspect_consent_blocking(|| panic!("synthetic inspection failure"))
+            .await
+            .expect_err("panic must be a refusal");
+        assert_eq!(error.code, BrowserRefusalCode::BrowserRouteUnavailable);
+    }
 
     fn node(control_type: &str, name: &str, actions: &[&str]) -> UiaNode {
         UiaNode {
@@ -864,7 +898,7 @@ mod tests {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (finish_tx, finish_rx) = std::sync::mpsc::channel();
         let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
-        let scan = tokio::task::spawn_blocking(move || {
+        let scan = tokio::spawn(inspect_consent_blocking(move || {
             let ptr = Box::into_raw(Box::new(OwnedReference {
                 vtable: &VTABLE,
                 released: Some(dropped_tx),
@@ -875,9 +909,9 @@ mod tests {
             ready_tx.send(()).unwrap();
             finish_rx.recv().unwrap();
             owned
-        });
+        }));
         ready_rx.await.unwrap();
-        drop(scan);
+        scan.abort();
         finish_tx.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(2), dropped_rx)
             .await

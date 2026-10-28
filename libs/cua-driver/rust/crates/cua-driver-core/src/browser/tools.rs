@@ -86,10 +86,7 @@ async fn read_activated_tab(
             }
             return Err(ForegroundReadbackError::StaleDocument);
         }
-        let committed_url = frame["url"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or(ForegroundReadbackError::Failed)?;
+        let committed_url = frame_document_url(frame).ok_or(ForegroundReadbackError::Failed)?;
         let observed_loader_id = frame["loaderId"]
             .as_str()
             .filter(|value| !value.is_empty())
@@ -106,9 +103,10 @@ async fn read_activated_tab(
         let encoded = value["result"]["value"].as_str().unwrap_or_default();
         let readback: Value =
             serde_json::from_str(encoded).map_err(|_| ForegroundReadbackError::Failed)?;
-        let same_document_matches = readback["current_url"].as_str() == Some(committed_url)
+        let same_document_matches = readback["current_url"].as_str()
+            == Some(committed_url.as_str())
             && (expected_loader_id.is_some()
-                || navigation_urls_match(committed_url, requested_url));
+                || navigation_urls_match(&committed_url, requested_url));
         let settled = matches!(
             readback["ready_state"].as_str(),
             Some("interactive" | "complete")
@@ -130,7 +128,7 @@ async fn read_activated_tab(
             let final_frame = &final_tree["frameTree"]["frame"];
             if final_frame["id"].as_str() != Some(expected_frame_id)
                 || final_frame["loaderId"].as_str() != Some(observed_loader_id)
-                || final_frame["url"].as_str() != Some(committed_url)
+                || frame_document_url(final_frame).as_deref() != Some(committed_url.as_str())
             {
                 return Err(ForegroundReadbackError::StaleDocument);
             }
@@ -144,6 +142,22 @@ async fn read_activated_tab(
         Err(ForegroundReadbackError::Timeout)
     } else {
         Err(ForegroundReadbackError::StaleDocument)
+    }
+}
+
+fn frame_document_url(frame: &Value) -> Option<String> {
+    let url = frame["url"].as_str().filter(|url| !url.is_empty())?;
+    match frame.get("urlFragment") {
+        None => Some(url.to_owned()),
+        Some(fragment) => {
+            let fragment = fragment
+                .as_str()
+                .filter(|fragment| fragment.starts_with('#'))?;
+            if url.contains('#') {
+                return None;
+            }
+            Some(format!("{url}{fragment}"))
+        }
     }
 }
 
