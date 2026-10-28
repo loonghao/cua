@@ -107,7 +107,8 @@ async fn read_activated_tab(
         let readback: Value =
             serde_json::from_str(encoded).map_err(|_| ForegroundReadbackError::Failed)?;
         let same_document_matches = readback["current_url"].as_str() == Some(committed_url)
-            && (expected_loader_id.is_some() || committed_url == requested_url);
+            && (expected_loader_id.is_some()
+                || navigation_urls_match(committed_url, requested_url));
         let settled = matches!(
             readback["ready_state"].as_str(),
             Some("interactive" | "complete")
@@ -143,6 +144,13 @@ async fn read_activated_tab(
         Err(ForegroundReadbackError::Timeout)
     } else {
         Err(ForegroundReadbackError::StaleDocument)
+    }
+}
+
+fn navigation_urls_match(committed: &str, requested: &str) -> bool {
+    match (url::Url::parse(committed), url::Url::parse(requested)) {
+        (Ok(committed), Ok(requested)) => committed == requested,
+        _ => committed == requested,
     }
 }
 
@@ -3369,6 +3377,32 @@ impl Tool for BrowserSetInputFilesTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn navigation_urls_match_canonical_urls_without_widening_document_identity() {
+        for (committed, requested, expected) in [
+            ("https://fixture.test/", "https://fixture.test", true),
+            (
+                "https://fixture.test/path",
+                "https://FIXTURE.test:443/path",
+                true,
+            ),
+            (
+                "https://fixture.test/path#new",
+                "https://fixture.test/path#old",
+                false,
+            ),
+            (
+                "https://fixture.test/new",
+                "https://fixture.test/old",
+                false,
+            ),
+            ("https://other.test/", "https://fixture.test/", false),
+            ("invalid url", "invalid url", true),
+            ("invalid url", "other invalid url", false),
+        ] {
+            assert_eq!(super::navigation_urls_match(committed, requested), expected);
+        }
+    }
     use super::*;
     use crate::browser::platform::{
         BrowserPlatform, PrepareAction, PrepareOutcome, PrepareRequest,
