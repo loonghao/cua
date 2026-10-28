@@ -53,8 +53,8 @@ use super::semantic::{
     SemanticScopeFailure, DEFAULT_SEMANTIC_NODE_BUDGET, SEMANTIC_COMPUTED_STYLES,
 };
 use super::store::{
-    format_ref, BrowserStore, FrameIdentity, FrameKind, FrameRef, RefEntry, SemanticContinuation,
-    SnapshotRecord, TabRecord, TargetRecord,
+    format_ref, BrowserStore, BrowserVisibility, FrameIdentity, FrameKind, FrameRef, RefEntry,
+    SemanticContinuation, SnapshotRecord, TabRecord, TargetRecord,
 };
 use super::types::{
     BindingQuality, BrowserClassification, BrowserEngineFamily, BrowserProcessRole,
@@ -1775,21 +1775,7 @@ impl BrowserEngine {
         // focusing its native window or invoking any CDP activation command.
         // Treat an unavailable or malformed proof as inactive: omitting
         // feedback is safer than drawing a cursor over another tab.
-        let tab_is_active = validated
-            .conn
-            .call(
-                Some(&validated.cdp_session),
-                "Runtime.evaluate",
-                json!({
-                    "expression": "document.visibilityState === 'visible'",
-                    "returnByValue": true,
-                    "awaitPromise": false,
-                }),
-            )
-            .await
-            .ok()
-            .and_then(|result| result.pointer("/result/value").and_then(Value::as_bool))
-            .unwrap_or(false);
+        let tab_is_active = tab_visibility_proven(&validated.conn, &validated.cdp_session).await;
 
         let screen_point = if cdp_session == validated.cdp_session {
             validated
@@ -2943,6 +2929,24 @@ impl BrowserEngine {
             OopifStatus::Unsupported
         };
 
+        if !semantic.nodes.iter().any(|node| {
+            matches!(
+                node.visibility,
+                BrowserVisibility::InViewport
+                    | BrowserVisibility::NearViewport
+                    | BrowserVisibility::Offscreen
+            )
+        }) && !tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tab_visibility_proven(&conn, &cdp_session),
+        )
+        .await
+        .unwrap_or(false)
+        {
+            semantic.not_rendered_count = 1;
+            semantic.complete = false;
+        }
+
         let mut scope_identity = None;
         let scope_anchor = match &scope_entry {
             Some((external, entry)) => {
@@ -3049,6 +3053,22 @@ impl BrowserEngine {
     }
 }
 
+async fn tab_visibility_proven(conn: &CdpConnection, cdp_session: &str) -> bool {
+    conn.call(
+        Some(cdp_session),
+        "Runtime.evaluate",
+        json!({
+            "expression": "document.visibilityState === 'visible'",
+            "returnByValue": true,
+            "awaitPromise": false,
+        }),
+    )
+    .await
+    .ok()
+    .and_then(|result| result.pointer("/result/value").and_then(Value::as_bool))
+    .unwrap_or(false)
+}
+
 /// Attribute names that make an element interactive-enough to ref.
 const INTERACTIVE_ATTRS: &[&str] = &["onclick", "role", "contenteditable", "tabindex", "href"];
 /// Element names always considered interactive.
@@ -3119,6 +3139,9 @@ fn collect_interactive(
                 .find(|kv| kv[0].eq_ignore_ascii_case(key))
                 .map(|kv| kv[1].as_str())
         };
+        let closed_select = name == "select"
+            && attr("multiple").is_none()
+            && attr("size").and_then(|size| size.trim().parse::<u32>().ok()) <= Some(1);
         let interactive = INTERACTIVE_TAGS.contains(&name.as_str())
             || INTERACTIVE_ATTRS.iter().any(|a| attr(a).is_some());
         if interactive {
@@ -3136,6 +3159,9 @@ fn collect_interactive(
                     in_root_frame,
                 });
             }
+        }
+        if closed_select {
+            return;
         }
     }
     if let Some(children) = node.get("children").and_then(Value::as_array) {
@@ -3371,6 +3397,36 @@ mod tests {
         let inner = out.iter().find(|e| e.backend_node_id == 30).unwrap();
         assert!(!inner.in_root_frame);
         assert_eq!(inner.frame_id.as_deref(), Some("F_IFRAME"));
+    }
+
+    #[test]
+    fn collector_refs_a_closed_select_without_its_options() {
+        let option = |backend: i64| {
+            json!({"nodeType": 1, "nodeName": "OPTION", "backendNodeId": backend,
+                   "attributes": ["value", format!("c{backend}")]})
+        };
+        let doc = json!({
+            "nodeType": 9,
+            "nodeName": "#document",
+            "frameId": "F_MAIN",
+            "children": [
+                {"nodeType": 1, "nodeName": "SELECT", "backendNodeId": 1,
+                 "attributes": ["name", "country"],
+                 "children": (100..250).map(option).collect::<Vec<_>>()},
+                {"nodeType": 1, "nodeName": "SELECT", "backendNodeId": 2,
+                 "attributes": ["name", "tags", "multiple", ""],
+                 "children": [option(300), option(301)]},
+                {"nodeType": 1, "nodeName": "SELECT", "backendNodeId": 3,
+                 "attributes": ["name", "list", "size", "4"],
+                 "children": [option(400)]},
+                {"nodeType": 1, "nodeName": "BUTTON", "backendNodeId": 4,
+                 "attributes": ["type", "submit"]}
+            ]
+        });
+        let mut out = Vec::new();
+        collect_interactive(&doc, Some("F_MAIN"), true, &mut out);
+        let backends: Vec<i64> = out.iter().map(|e| e.backend_node_id).collect();
+        assert_eq!(backends, vec![1, 2, 300, 301, 3, 400, 4]);
     }
 
     #[test]
