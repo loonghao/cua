@@ -60,3 +60,9 @@ The final navigation review also identified URL normalization in same-document
 readback: requested and committed URLs now compare as parsed URLs when valid,
 with exact raw equality on parse failure. The DOM URL, frame, loader and visible
 readback fences remain exact; different fragments, paths or hosts still fail.
+
+Pending Windows setup handles retain a process-wide MTA usage cookie while
+they own agile UIA identities. The creating thread keeps its own COM scope
+local; consuming cleanup releases identities before the MTA cookie, including
+when cleanup scope initialization refuses. Cross-thread ordering is covered by
+pure tests; actual Windows COM and browser behavior require native validation.

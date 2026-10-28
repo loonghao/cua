@@ -13,8 +13,8 @@ use cua_driver_core::browser::{
 use windows::core::{AgileReference, Interface, BSTR};
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
-    SAFEARRAY,
+    CoCreateInstance, CoDecrementMTAUsage, CoIncrementMTAUsage, CoInitializeEx, CoUninitialize,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CO_MTA_USAGE_COOKIE, SAFEARRAY,
 };
 use windows::Win32::System::Ole::{
     SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetElemsize,
@@ -84,7 +84,8 @@ fn native_nodes(hwnd: u64) -> Result<Vec<UiaNode>, BrowserRefusal> {
 
 const MAX_RUNTIME_ID_PARTS: usize = 1024;
 
-struct SetupComScope;
+// CoUninitialize must run on the same thread as CoInitializeEx.
+struct SetupComScope(std::marker::PhantomData<std::rc::Rc<()>>);
 
 impl SetupComScope {
     fn new() -> Result<Self, BrowserRefusal> {
@@ -96,7 +97,7 @@ impl SetupComScope {
                     format!("native setup cleanup COM initialization failed: {error}"),
                 )
             })?;
-        Ok(Self)
+        Ok(Self(std::marker::PhantomData))
     }
 }
 
@@ -106,6 +107,38 @@ impl Drop for SetupComScope {
             CoUninitialize();
         }
     }
+}
+
+// A pending setup may move across threads. This process-wide MTA usage cookie
+// keeps its agile UIA references alive without moving a thread-bound COM scope.
+struct SetupMtaUsage(CO_MTA_USAGE_COOKIE);
+
+// CoDecrementMTAUsage explicitly permits consuming its cookie on another thread.
+unsafe impl Send for SetupMtaUsage {}
+
+impl SetupMtaUsage {
+    fn new() -> Result<Self, BrowserRefusal> {
+        unsafe { CoIncrementMTAUsage() }.map(Self).map_err(|error| {
+            refusal(
+                BrowserRefusalCode::BrowserRouteUnavailable,
+                format!("native setup MTA retention failed: {error}"),
+            )
+        })
+    }
+}
+
+impl Drop for SetupMtaUsage {
+    fn drop(&mut self) {
+        if let Err(error) = unsafe { CoDecrementMTAUsage(self.0) } {
+            tracing::warn!(%error, "native setup MTA retention release failed");
+        }
+    }
+}
+
+// Fields drop in declaration order: retained UIA identities before MTA usage.
+struct RetainedSetup<T, U> {
+    owned_tab: Option<T>,
+    _mta_usage: U,
 }
 
 /// UIA IDs are opaque and may be reused after an element dies. They identify
@@ -1080,7 +1113,7 @@ fn with_cleanup_scope<T, S, R, E>(
 pub struct SetupUiHandle {
     hwnd: u64,
     window_identity: SetupWindowIdentity,
-    owned_tab: Option<OwnedSetupTab>,
+    ownership: RetainedSetup<OwnedSetupTab, SetupMtaUsage>,
     new_tab_action_attempted: bool,
     descriptor: &'static BrowserSetupDescriptor,
     pub opened_setup_page: bool,
@@ -1096,7 +1129,7 @@ impl SetupUiHandle {
     fn revalidate_rollback_context(&self) -> Result<(), BrowserRefusal> {
         revalidate_rollback_context(
             || self.window_identity.revalidate(),
-            self.owned_tab.as_ref(),
+            self.ownership.owned_tab.as_ref(),
             |owned| owned.active(self.window_identity),
         )
     }
@@ -1208,8 +1241,8 @@ impl SetupUiHandle {
                 "injected_global_input": injected_global_input,
                 "restored_remote_debugging": restored_remote_debugging,
                 "remote_debugging_restore_unconfirmed": self.enable_attempted && self.initial_debugging_state == Some(CheckboxState::Off) && !restored_remote_debugging,
-                "owned_setup_tab_identified": self.owned_tab.is_some(),
-                "setup_tab_creation_unproven": self.new_tab_action_attempted && !opened_setup_page && self.owned_tab.is_none(),
+                "owned_setup_tab_identified": self.ownership.owned_tab.is_some(),
+                "setup_tab_creation_unproven": self.new_tab_action_attempted && !opened_setup_page && self.ownership.owned_tab.is_none(),
                 "setup_tab_cleanup_status": cleanup_status,
                 "setup_tab_cleanup_refusal": cleanup_refusal,
             },
@@ -1241,7 +1274,7 @@ impl SetupUiHandle {
             return Ok(None);
         }
         let owned =
-            self.owned_tab.as_ref().ok_or_else(|| {
+            self.ownership.owned_tab.as_ref().ok_or_else(|| {
                 refusal(BrowserRefusalCode::BrowserBindingAmbiguous,
             "the newly opened setup tab has no independently retained native ownership proof")
             })?;
@@ -1307,6 +1340,7 @@ fn set_remote_debugging(
     desired_enabled: bool,
 ) -> Result<SetupUiHandle, BrowserRefusal> {
     let _com = SetupComScope::new()?;
+    let mta_usage = SetupMtaUsage::new()?;
     let window_identity = SetupWindowIdentity::capture(hwnd)?;
     let initial_native = native_nodes(hwnd)?;
     let setup_page_active = needs_setup_page_renderer(&initial_native, descriptor);
@@ -1324,7 +1358,10 @@ fn set_remote_debugging(
         Ok(Some(_)) => SetupUiHandle {
             hwnd,
             window_identity,
-            owned_tab: None,
+            ownership: RetainedSetup {
+                owned_tab: None,
+                _mta_usage: mta_usage,
+            },
             new_tab_action_attempted: false,
             descriptor,
             opened_setup_page: false,
@@ -1341,7 +1378,10 @@ fn set_remote_debugging(
             let mut handle = SetupUiHandle {
                 hwnd,
                 window_identity,
-                owned_tab: None,
+                ownership: RetainedSetup {
+                    owned_tab: None,
+                    _mta_usage: mta_usage,
+                },
                 new_tab_action_attempted: false,
                 descriptor,
                 opened_setup_page: false,
@@ -1439,7 +1479,7 @@ fn set_remote_debugging(
                         let owned = OwnedSetupTab::capture(&tree, index, owned_window);
                         match owned {
                             Ok(owned) => {
-                                handle.owned_tab = Some(owned);
+                                handle.ownership.owned_tab = Some(owned);
                                 handle.opened_setup_page = true;
                                 break tree;
                             }
@@ -1656,6 +1696,54 @@ mod tests {
             assert_eq!(*events.borrow(), ["cleanup", "owned", "scope"]);
         }
     }
+    #[test]
+    fn retained_setup_drops_owned_tab_before_mta_usage_on_another_thread() {
+        use std::sync::{Arc, Mutex};
+
+        struct Tracked(&'static str, Arc<Mutex<Vec<&'static str>>>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().push(self.0);
+            }
+        }
+
+        fn assert_send<T: Send>() {}
+        assert_send::<SetupUiHandle>();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let retained = RetainedSetup {
+            owned_tab: Some(Tracked("tab", events.clone())),
+            _mta_usage: Tracked("mta", events.clone()),
+        };
+        std::thread::spawn(move || drop(retained)).join().unwrap();
+        assert_eq!(*events.lock().unwrap(), ["tab", "mta"]);
+    }
+
+    #[test]
+    fn retained_setup_drops_identity_before_usage_when_cleanup_scope_refuses() {
+        use std::sync::{Arc, Mutex};
+
+        struct Tracked(&'static str, Arc<Mutex<Vec<&'static str>>>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().push(self.0);
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let retained = RetainedSetup {
+            owned_tab: Some(Tracked("tab", events.clone())),
+            _mta_usage: Tracked("mta", events.clone()),
+        };
+        let result = with_cleanup_scope(
+            retained,
+            || Err::<(), _>("COM unavailable"),
+            |_| panic!("cleanup must not run without its COM scope"),
+        );
+        assert_eq!(result, Err("COM unavailable"));
+        assert_eq!(*events.lock().unwrap(), ["tab", "mta"]);
+    }
+
     fn descriptor() -> &'static BrowserSetupDescriptor {
         existing_profile_setup_descriptor(BrowserProduct::GoogleChrome).unwrap()
     }
