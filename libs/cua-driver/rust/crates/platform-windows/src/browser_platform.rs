@@ -40,7 +40,12 @@ use crate::browser_standard_user::{
 };
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_INSUFFICIENT_BUFFER, E_ACCESSDENIED, FILETIME, HWND, NO_ERROR, RECT,
+    CloseHandle, BOOL, ERROR_INSUFFICIENT_BUFFER, E_ACCESSDENIED, FILETIME, HWND, LPARAM, NO_ERROR,
+    RECT,
+};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, HDC, HMONITOR, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID,
@@ -59,7 +64,7 @@ use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::{
     FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86, SHGetKnownFolderPath, KF_FLAG_DEFAULT,
 };
@@ -84,10 +89,6 @@ impl Default for WindowsBrowserPlatform {
     fn default() -> Self {
         Self::new(Arc::new(cursor_overlay::CursorRegistry::new()))
     }
-}
-
-fn refusal(code: BrowserRefusalCode, message: impl Into<String>) -> BrowserRefusal {
-    BrowserRefusal::new(code, message)
 }
 
 fn is_chromium(name: &str) -> bool {
@@ -161,7 +162,7 @@ fn isolated_browser_candidates_from_roots(
 
 fn known_folder_path(id: &windows::core::GUID) -> Result<PathBuf, BrowserRefusal> {
     let raw = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }.map_err(|error| {
-        refusal(
+        BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             format!("could not resolve trusted Windows installation root: {error}"),
         )
@@ -169,7 +170,7 @@ fn known_folder_path(id: &windows::core::GUID) -> Result<PathBuf, BrowserRefusal
     let decoded = unsafe { raw.to_string() };
     unsafe { CoTaskMemFree(Some(raw.0.cast())) };
     decoded.map(PathBuf::from).map_err(|error| {
-        refusal(
+        BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             format!("trusted Windows installation root was not valid Unicode: {error}"),
         )
@@ -737,11 +738,11 @@ fn user_data_dir_from_command_line(
     match directories.as_slice() {
         [] => Ok(default),
         [path] if is_windows_absolute_path(path) => Ok(Some(path.clone())),
-        [_] => Err(refusal(
+        [_] => Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             "the browser uses a relative --user-data-dir that cannot be attested without its launch working directory",
         )),
-        _ => Err(refusal(
+        _ => Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserBindingAmbiguous,
             "browser process has multiple distinct --user-data-dir arguments",
         )),
@@ -770,20 +771,20 @@ async fn browser_command_line(pid: u32) -> Result<String, BrowserRefusal> {
         .output()
         .await
         .map_err(|error| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("could not inspect browser arguments: {error}"),
             )
         })?;
     if !output.status.success() {
-        return Err(refusal(
+        return Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserBindingStale,
             format!("browser process {pid} arguments are unavailable"),
         ));
     }
     let command_line = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if command_line.is_empty() {
-        return Err(refusal(
+        return Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserBindingStale,
             format!("browser process {pid} has no command line"),
         ));
@@ -807,14 +808,14 @@ async fn active_port_endpoint(
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(refusal(
+            return Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("could not read the browser's DevToolsActivePort file: {error}"),
             ))
         }
     };
     let Some((port, path)) = parse_devtools_active_port(&text) else {
-        return Err(refusal(
+        return Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserEndpointOwnerMismatch,
             "the browser's DevToolsActivePort file did not contain one exact browser endpoint",
         ));
@@ -939,7 +940,7 @@ fn canonical_discovered_websocket_url(url: &str, expected_port: u16) -> Option<S
 fn process_identity(pid: u32) -> Result<(u64, Option<String>), BrowserRefusal> {
     let handle =
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserBindingStale,
                 format!("browser process {pid} is no longer available"),
             )
@@ -966,7 +967,7 @@ fn process_identity(pid: u32) -> Result<(u64, Option<String>), BrowserRefusal> {
     .map(canonical_process_executable);
     let _ = unsafe { CloseHandle(handle) };
     times.map_err(|error| {
-        refusal(
+        BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             format!("could not fingerprint browser process {pid}: {error}"),
         )
@@ -987,18 +988,213 @@ fn cdp_comparable_window_bounds(window_id: u64) -> Result<Rect, BrowserRefusal> 
     let hwnd = HWND(window_id as *mut _);
     let mut outer = RECT::default();
     unsafe { GetWindowRect(hwnd, &mut outer) }.map_err(|error| {
-        refusal(
+        BrowserRefusal::new(
             BrowserRefusalCode::BrowserBindingStale,
             format!("could not read Windows outer bounds for window {window_id}: {error}"),
         )
     })?;
+    let physical = (
+        outer.left,
+        outer.top,
+        outer.right - outer.left,
+        outer.bottom - outer.top,
+    );
+    let displays = physical_displays();
+    let window_monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let monitor_rect = monitor_info(window_monitor).map(|(rect, _)| rect);
+    let window_display = monitor_rect.and_then(|rect| {
+        displays.iter().position(|display| {
+            (display.left, display.top, display.right, display.bottom)
+                == (rect.left, rect.top, rect.right, rect.bottom)
+        })
+    });
+    if let Some(bounds) =
+        window_display.and_then(|index| physical_window_to_chromium_dip(physical, &displays, index))
+    {
+        return Ok(bounds);
+    }
+    // Fallback (display layout unavailable or not edge-connected to the
+    // primary): scale absolute coordinates by the window DPI. Exact on the
+    // primary display and on any display whose physical origin equals its
+    // Chromium DIP origin.
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     let scale = if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 };
     Ok(Rect::new(
-        f64::from(outer.left) / scale,
-        f64::from(outer.top) / scale,
-        f64::from(outer.right - outer.left) / scale,
-        f64::from(outer.bottom - outer.top) / scale,
+        f64::from(physical.0) / scale,
+        f64::from(physical.1) / scale,
+        f64::from(physical.2) / scale,
+        f64::from(physical.3) / scale,
+    ))
+}
+
+/// One monitor in physical (virtual-screen) pixels with its effective scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PhysicalDisplay {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    scale: f64,
+    primary: bool,
+}
+
+const MONITORINFOF_PRIMARY_FLAG: u32 = 1;
+
+fn monitor_info(monitor: HMONITOR) -> Option<(RECT, bool)> {
+    if monitor.is_invalid() {
+        return None;
+    }
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetMonitorInfoW(monitor, &mut info) }
+        .as_bool()
+        .then_some((
+            info.rcMonitor,
+            info.dwFlags & MONITORINFOF_PRIMARY_FLAG != 0,
+        ))
+}
+
+fn physical_displays() -> Vec<PhysicalDisplay> {
+    unsafe extern "system" fn collect(
+        monitor: HMONITOR,
+        _hdc: HDC,
+        _clip: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
+        let displays = &mut *(data.0 as *mut Vec<PhysicalDisplay>);
+        if let Some((rect, primary)) = monitor_info(monitor) {
+            let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
+            let scale = match GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) {
+                Ok(()) if dpi_x != 0 => f64::from(dpi_x) / 96.0,
+                _ => 1.0,
+            };
+            displays.push(PhysicalDisplay {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+                scale,
+                primary,
+            });
+        }
+        BOOL(1)
+    }
+
+    let mut displays: Vec<PhysicalDisplay> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            HDC::default(),
+            None,
+            Some(collect),
+            LPARAM(&mut displays as *mut Vec<PhysicalDisplay> as isize),
+        );
+    }
+    displays
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayEdge {
+    Right,
+    Left,
+    Bottom,
+    Top,
+}
+
+/// Which edge of `parent` the `child` display shares (with a non-empty
+/// overlap along that edge), mirroring Chromium's touching-display test.
+fn shared_edge(parent: &PhysicalDisplay, child: &PhysicalDisplay) -> Option<DisplayEdge> {
+    let overlaps = |a0: i32, a1: i32, b0: i32, b1: i32| a0.max(b0) < a1.min(b1);
+    let vertical_overlap = overlaps(parent.top, parent.bottom, child.top, child.bottom);
+    let horizontal_overlap = overlaps(parent.left, parent.right, child.left, child.right);
+    if child.left == parent.right && vertical_overlap {
+        Some(DisplayEdge::Right)
+    } else if child.right == parent.left && vertical_overlap {
+        Some(DisplayEdge::Left)
+    } else if child.top == parent.bottom && horizontal_overlap {
+        Some(DisplayEdge::Bottom)
+    } else if child.bottom == parent.top && horizontal_overlap {
+        Some(DisplayEdge::Top)
+    } else {
+        None
+    }
+}
+
+/// Lay displays out in DIP space the way Chromium's `display::win::ScreenWin`
+/// does: the primary display keeps its origin, and every other display is
+/// placed against the edge it shares with an already placed display. The
+/// offset along that edge is scaled by the display it lies within (the
+/// child's scale when the child starts before the parent, otherwise the
+/// parent's), so a display's DIP origin generally differs from its physical
+/// origin divided by its own scale. Returns `None` for displays that are not
+/// edge-connected to the primary display.
+fn chromium_dip_origins(displays: &[PhysicalDisplay]) -> Vec<Option<(f64, f64)>> {
+    let mut origins: Vec<Option<(f64, f64)>> = vec![None; displays.len()];
+    let Some(primary) = displays.iter().position(|display| display.primary) else {
+        return origins;
+    };
+    origins[primary] = Some((
+        f64::from(displays[primary].left),
+        f64::from(displays[primary].top),
+    ));
+    let mut remaining: Vec<usize> = (0..displays.len()).filter(|&i| i != primary).collect();
+    let mut parents = vec![primary];
+    while let Some(parent_index) = parents.pop() {
+        let parent = displays[parent_index];
+        let (parent_x, parent_y) = origins[parent_index].expect("placed parent");
+        let parent_width = f64::from(parent.right - parent.left) / parent.scale;
+        let parent_height = f64::from(parent.bottom - parent.top) / parent.scale;
+        let mut still_remaining = Vec::with_capacity(remaining.len());
+        for child_index in remaining {
+            let child = displays[child_index];
+            let Some(edge) = shared_edge(&parent, &child) else {
+                still_remaining.push(child_index);
+                continue;
+            };
+            let (parent_begin, child_begin) = match edge {
+                DisplayEdge::Right | DisplayEdge::Left => (parent.top, child.top),
+                DisplayEdge::Bottom | DisplayEdge::Top => (parent.left, child.left),
+            };
+            let offset = if child_begin < parent_begin {
+                -(f64::from(parent_begin - child_begin) / child.scale)
+            } else {
+                f64::from(child_begin - parent_begin) / parent.scale
+            }
+            .floor();
+            let child_width = f64::from(child.right - child.left) / child.scale;
+            let child_height = f64::from(child.bottom - child.top) / child.scale;
+            origins[child_index] = Some(match edge {
+                DisplayEdge::Right => (parent_x + parent_width, parent_y + offset),
+                DisplayEdge::Left => (parent_x - child_width, parent_y + offset),
+                DisplayEdge::Bottom => (parent_x + offset, parent_y + parent_height),
+                DisplayEdge::Top => (parent_x + offset, parent_y - child_height),
+            });
+            parents.push(child_index);
+        }
+        remaining = still_remaining;
+    }
+    origins
+}
+
+/// Convert a physical window rect `(x, y, width, height)` on
+/// `displays[display_index]` to the DIP coordinates Chromium reports through
+/// CDP `Browser.getWindowForTarget` (#4428).
+fn physical_window_to_chromium_dip(
+    physical: (i32, i32, i32, i32),
+    displays: &[PhysicalDisplay],
+    display_index: usize,
+) -> Option<Rect> {
+    let display = displays.get(display_index)?;
+    let (origin_x, origin_y) = chromium_dip_origins(displays)
+        .get(display_index)
+        .copied()??;
+    let scale = display.scale;
+    Some(Rect::new(
+        origin_x + f64::from(physical.0 - display.left) / scale,
+        origin_y + f64::from(physical.1 - display.top) / scale,
+        f64::from(physical.2) / scale,
+        f64::from(physical.3) / scale,
     ))
 }
 
@@ -1061,7 +1257,7 @@ unsafe fn decode_owner_table<R: Copy>(
         .get(..4)
         .and_then(|part| part.try_into().ok())
         .ok_or_else(|| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 "Windows returned a truncated TCP owner table",
             )
@@ -1069,7 +1265,7 @@ unsafe fn decode_owner_table<R: Copy>(
     let count = u32::from_ne_bytes(count_bytes) as usize;
     let row_size = std::mem::size_of::<R>();
     if row_offset < count_bytes.len() || row_size == 0 {
-        return Err(refusal(
+        return Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             "Windows returned an invalid TCP owner table layout",
         ));
@@ -1079,7 +1275,7 @@ unsafe fn decode_owner_table<R: Copy>(
         .and_then(|rows| rows.checked_add(row_offset))
         .filter(|required| *required <= bytes.len())
         .ok_or_else(|| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 "Windows returned an invalid TCP owner table length",
             )
@@ -1100,7 +1296,7 @@ fn query_tcp_owner_table_with(
     let mut size = 0u32;
     let status = query(None, &mut size);
     if status != ERROR_INSUFFICIENT_BUFFER.0 && status != NO_ERROR.0 {
-        return Err(refusal(
+        return Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             format!("could not size the Windows TCP owner table: error {status}"),
         ));
@@ -1112,7 +1308,7 @@ fn query_tcp_owner_table_with(
     for _ in 0..TCP_OWNER_TABLE_READ_ATTEMPTS {
         let requested = size as usize;
         if requested > MAX_TCP_OWNER_TABLE_BYTES {
-            return Err(refusal(
+            return Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("Windows TCP owner table exceeded {MAX_TCP_OWNER_TABLE_BYTES} bytes"),
             ));
@@ -1125,7 +1321,7 @@ fn query_tcp_owner_table_with(
             let returned = buffer_size as usize;
             let allocated = buffer.len() * std::mem::size_of::<u32>();
             if returned > allocated {
-                return Err(refusal(
+                return Err(BrowserRefusal::new(
                     BrowserRefusalCode::BrowserRouteUnavailable,
                     "Windows returned an oversized TCP owner table",
                 ));
@@ -1135,7 +1331,7 @@ fn query_tcp_owner_table_with(
             return Ok(bytes.to_vec());
         }
         if status != ERROR_INSUFFICIENT_BUFFER.0 {
-            return Err(refusal(
+            return Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("could not read the Windows TCP owner table: error {status}"),
             ));
@@ -1143,7 +1339,7 @@ fn query_tcp_owner_table_with(
         size = buffer_size;
     }
 
-    Err(refusal(
+    Err(BrowserRefusal::new(
         BrowserRefusalCode::BrowserRouteUnavailable,
         format!(
             "Windows TCP owner table changed during {TCP_OWNER_TABLE_READ_ATTEMPTS} consecutive reads"
@@ -1171,7 +1367,7 @@ fn windows_loopback_listeners_with(
     let ipv4 = query(u32::from(AF_INET.0));
     let ipv6 = query(u32::from(AF_INET6.0));
     if let (Err(ipv4), Err(ipv6)) = (&ipv4, &ipv6) {
-        return Err(refusal(
+        return Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             format!(
                 "could not inspect either Windows TCP owner table: IPv4: {}; IPv6: {}",
@@ -1242,7 +1438,7 @@ fn system_directory_path() -> Result<PathBuf, BrowserRefusal> {
     let mut buffer = [0u16; 32768];
     let length = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
     if length == 0 || length >= buffer.len() {
-        return Err(refusal(
+        return Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             "could not resolve the trusted Windows system directory",
         ));
@@ -1257,7 +1453,7 @@ async fn native_loopback_listeners(
     tokio::task::spawn_blocking(move || windows_loopback_listeners(&allowed_pids))
         .await
         .map_err(|error| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("could not inspect Windows TCP listener ownership: {error}"),
             )
@@ -1271,7 +1467,7 @@ async fn raw_loopback_listeners_for_process_tree(
         tokio::task::spawn_blocking(move || crate::win32::list_descendants(root_pid))
             .await
             .map_err(|error| {
-                refusal(
+                BrowserRefusal::new(
                     BrowserRefusalCode::BrowserRouteUnavailable,
                     format!("could not inspect browser process tree: {error}"),
                 )
@@ -1285,7 +1481,7 @@ async fn raw_loopback_listeners_for_process_tree(
     })
     .await
     .map_err(|error| {
-        refusal(
+        BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             format!("could not inspect spawned browser listener identities: {error}"),
         )
@@ -1303,13 +1499,13 @@ async fn loopback_listeners_for_process_tree(
     })
     .await
     .map_err(|error| {
-        refusal(
+        BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             format!("could not inspect browser process lifetimes: {error}"),
         )
     })?
     .ok_or_else(|| {
-        refusal(
+        BrowserRefusal::new(
             BrowserRefusalCode::BrowserBindingStale,
             format!("browser process {root_pid} is no longer available"),
         )
@@ -1324,7 +1520,7 @@ async fn loopback_listeners_for_process_tree(
     })
     .await
     .map_err(|error| {
-        refusal(
+        BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             format!("could not reprove browser listener identities: {error}"),
         )
@@ -1336,7 +1532,7 @@ async fn loopback_listeners_for_exact_pid(pid: u32) -> Result<Vec<(u16, u32)>, B
         tokio::task::spawn_blocking(move || process_identity(pid).map(|identity| identity.0))
             .await
             .map_err(|error| {
-                refusal(
+                BrowserRefusal::new(
                     BrowserRefusalCode::BrowserRouteUnavailable,
                     format!("could not inspect browser process identity: {error}"),
                 )
@@ -1355,7 +1551,7 @@ async fn loopback_listeners_for_exact_pid(pid: u32) -> Result<Vec<(u16, u32)>, B
     })
     .await
     .map_err(|error| {
-        refusal(
+        BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             format!("could not reprove browser process identity: {error}"),
         )
@@ -1443,13 +1639,13 @@ fn select_provisional_setup_port(
         [] if setup_was_already_enabled => match ports {
             [] => Ok(None),
             [port] => Ok(Some(*port)),
-            _ => Err(refusal(
+            _ => Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserBindingAmbiguous,
                 "the pre-enabled browser setup exposed multiple existing exact-pid loopback listeners",
             )),
         },
         [] => Ok(None),
-        _ => Err(refusal(
+        _ => Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserBindingAmbiguous,
             "the approved setup action exposed multiple newly correlated exact-pid listeners",
         )),
@@ -1520,7 +1716,7 @@ async fn root_can_use_embedded_descendant_endpoint(pid: u32) -> Result<bool, Bro
     })
     .await
     .map_err(|error| {
-        refusal(
+        BrowserRefusal::new(
             BrowserRefusalCode::BrowserRouteUnavailable,
             format!("could not classify browser process identity: {error}"),
         )
@@ -1540,7 +1736,7 @@ async fn embedded_browser_endpoints_once(
         })
         .await
         .map_err(|error| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("could not classify embedded browser listener: {error}"),
             )
@@ -1597,7 +1793,7 @@ async fn spawned_browser_endpoints_once(
     expected_ws_url: &str,
 ) -> Result<Vec<(u16, String, u32)>, BrowserRefusal> {
     let Some(expected_port) = literal_loopback_websocket_port(expected_ws_url) else {
-        return Err(refusal(
+        return Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserEndpointOwnerMismatch,
             "the driver-spawned browser endpoint is not loopback-only",
         ));
@@ -1674,7 +1870,7 @@ fn select_unique_owned_endpoint(
             context,
             transport,
         ))),
-        _ => Err(refusal(
+        _ => Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserBindingAmbiguous,
             "multiple browser-level DevTools endpoints satisfy the approved ownership scope",
         )
@@ -1807,12 +2003,12 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         }
         match decide_isolated_browser(&facts, context.kind()) {
             IsolatedBrowserDecision::Launch(index) => executables[index].take().ok_or_else(|| {
-                refusal(
+                BrowserRefusal::new(
                     BrowserRefusalCode::BrowserRouteUnavailable,
                     NO_PROTECTED_BROWSER_MESSAGE,
                 )
             }),
-            IsolatedBrowserDecision::Refuse(message) => Err(refusal(
+            IsolatedBrowserDecision::Refuse(message) => Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 message,
             )
@@ -1830,7 +2026,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                 .spawn()
                 .map(|child| Box::new(child) as Box<dyn IsolatedBrowserProcess>)
                 .map_err(|error| {
-                    refusal(
+                    BrowserRefusal::new(
                         BrowserRefusalCode::BrowserRouteUnavailable,
                         format!("could not launch an isolated browser process: {error}"),
                     )
@@ -1844,7 +2040,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                 spawn_with_token(token, &command)
                     .map(|child| Box::new(child) as Box<dyn IsolatedBrowserProcess>)
                     .map_err(|error| {
-                        refusal(
+                        BrowserRefusal::new(
                             BrowserRefusalCode::BrowserRouteUnavailable,
                             format!(
                                 "could not launch the isolated browser with the standard-user \
@@ -1930,7 +2126,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
 
     async fn classify_browser(&self, pid: i64) -> Result<BrowserClassification, BrowserRefusal> {
         let pid_u32 = u32::try_from(pid).map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
                 format!("pid {pid} is outside the Windows process-id range"),
             )
@@ -1945,7 +2141,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         .ok()
         .flatten()
         .ok_or_else(|| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserBindingStale,
                 format!("browser process {pid} is no longer available"),
             )
@@ -2019,7 +2215,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         window_id: u64,
     ) -> Result<NativeWindowInfo, BrowserRefusal> {
         let pid_u32 = u32::try_from(pid).map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
                 format!("pid {pid} is outside the Windows process-id range"),
             )
@@ -2031,7 +2227,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         .ok()
         .flatten()
         .ok_or_else(|| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserBindingStale,
                 format!("Windows window {window_id} is not owned by pid {pid}"),
             )
@@ -2061,7 +2257,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         window_id: u64,
     ) -> Result<Option<bool>, BrowserRefusal> {
         let pid_u32 = u32::try_from(pid).map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
                 format!("pid {pid} is outside the Windows process-id range"),
             )
@@ -2074,7 +2270,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         })
         .await
         .map_err(|error| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("could not enumerate Windows browser windows: {error}"),
             )
@@ -2087,7 +2283,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         pid: i64,
     ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
         let pid_u32 = u32::try_from(pid).map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
                 format!("pid {pid} is outside the Windows process-id range"),
             )
@@ -2106,7 +2302,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         expected_ws_url: &str,
     ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
         let pid_u32 = u32::try_from(pid).map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
                 format!("pid {pid} is outside the Windows process-id range"),
             )
@@ -2124,7 +2320,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         pid: i64,
     ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
         let pid_u32 = u32::try_from(pid).map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
                 format!("pid {pid} is outside the Windows process-id range"),
             )
@@ -2147,13 +2343,13 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         expected_ws_url: &str,
     ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
         let pid_u32 = u32::try_from(pid).map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
                 format!("pid {pid} is outside the Windows process-id range"),
             )
         })?;
         let Some(port) = literal_loopback_websocket_port(expected_ws_url) else {
-            return Err(refusal(
+            return Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserEndpointOwnerMismatch,
                 "the approved existing-profile endpoint is not loopback-only",
             ));
@@ -2161,7 +2357,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         let classification = self.classify_browser(pid).await?;
         if let Some(endpoint) = active_port_endpoint(pid_u32, classification.product_kind).await? {
             if endpoint.ws_url != expected_ws_url {
-                return Err(refusal(
+                return Err(BrowserRefusal::new(
                     BrowserRefusalCode::BrowserEndpointOwnerMismatch,
                     "the browser's exact DevTools endpoint changed after approval",
                 ));
@@ -2192,7 +2388,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         request: ExistingProfileSetupRequest,
     ) -> Result<ExistingProfileSetupOutcome, BrowserRefusal> {
         let descriptor = existing_profile_setup_descriptor(request.browser).ok_or_else(|| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!(
                     "approved existing-profile setup is not implemented for {:?}",
@@ -2201,7 +2397,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
             )
         })?;
         let pid_u32 = u32::try_from(request.pid).map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
                 "the approved browser pid is outside the Windows process-id range",
             )
@@ -2215,7 +2411,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
             tokio::task::spawn_blocking(move || crate::browser_setup_ui::enable(hwnd, descriptor))
                 .await
                 .map_err(|error| {
-                    refusal(
+                    BrowserRefusal::new(
                         BrowserRefusalCode::BrowserRouteUnavailable,
                         format!(
                             "could not inspect {}'s remote-debugging setup UI: {error}",
@@ -2287,7 +2483,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                         Duration::from_secs(1),
                     ) {
                         if now >= deadline {
-                            break Err(refusal(
+                            break Err(BrowserRefusal::new(
                                 BrowserRefusalCode::BrowserEndpointOwnerMismatch,
                                 format!(
                                     "{} did not keep one exact browser endpoint stable after the approved setup action",
@@ -2314,7 +2510,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 [] => {
-                    break Err(refusal(
+                    break Err(BrowserRefusal::new(
                         BrowserRefusalCode::BrowserRequiresSetup,
                         format!(
                             "{} did not expose a uniquely exact-pid-owned loopback endpoint after the exact setup action",
@@ -2323,7 +2519,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                     ))
                 }
                 _ => {
-                    break Err(refusal(
+                    break Err(BrowserRefusal::new(
                         BrowserRefusalCode::BrowserBindingAmbiguous,
                         format!(
                             "{} exposed multiple exact-pid-owned endpoint candidates after the exact setup action",
@@ -2339,7 +2535,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                 let error = tokio::task::spawn_blocking(move || handle.abort(error))
                     .await
                     .map_err(|join_error| {
-                        refusal(
+                        BrowserRefusal::new(
                             BrowserRefusalCode::BrowserRouteUnavailable,
                             format!("could not roll back browser setup: {join_error}"),
                         )
@@ -2370,7 +2566,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         })
         .await
         .map_err(|error| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("could not commit exact browser setup cleanup: {error}"),
             )
@@ -2382,7 +2578,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         request: ExistingProfileSetupRequest,
     ) -> Result<bool, BrowserRefusal> {
         let descriptor = existing_profile_setup_descriptor(request.browser).ok_or_else(|| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!(
                     "existing-profile cleanup is not implemented for {:?}",
@@ -2391,7 +2587,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
             )
         })?;
         let pid = u32::try_from(request.pid).map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
                 "the approved browser pid is outside the Windows process-id range",
             )
@@ -2412,7 +2608,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         })
         .await
         .unwrap_or_else(|join_error| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("could not roll back exact browser setup: {join_error}"),
             )
@@ -2428,7 +2624,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
 
     async fn process_fingerprint(&self, pid: i64) -> Result<ProcessFingerprint, BrowserRefusal> {
         let pid_u32 = u32::try_from(pid).map_err(|_| {
-            refusal(
+            BrowserRefusal::new(
                 BrowserRefusalCode::BrowserWrongTargetRefused,
                 format!("pid {pid} is outside the Windows process-id range"),
             )
@@ -2437,7 +2633,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
             tokio::task::spawn_blocking(move || process_identity(pid_u32))
                 .await
                 .map_err(|error| {
-                    refusal(
+                    BrowserRefusal::new(
                         BrowserRefusalCode::BrowserRouteUnavailable,
                         format!("process fingerprint task failed: {error}"),
                     )
@@ -2454,7 +2650,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         request: PrepareRequest,
     ) -> Result<PrepareOutcome, BrowserRefusal> {
         let Some(pid) = request.pid else {
-            return Err(refusal(
+            return Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRequiresSetup,
                 "pid-free isolated launch is handled by shared core",
             ));
@@ -2469,7 +2665,7 @@ impl BrowserPlatform for WindowsBrowserPlatform {
                 attachment: None,
             });
         }
-        Err(refusal(
+        Err(BrowserRefusal::new(
             BrowserRefusalCode::BrowserRequiresSetup,
             "No owned endpoint is available. Acting setup is handled by shared core only for a verified driver-owned isolated profile.",
         ))
@@ -2479,6 +2675,78 @@ impl BrowserPlatform for WindowsBrowserPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn display(left: i32, top: i32, right: i32, bottom: i32, scale: f64) -> PhysicalDisplay {
+        PhysicalDisplay {
+            left,
+            top,
+            right,
+            bottom,
+            scale,
+            primary: left == 0 && top == 0,
+        }
+    }
+
+    /// The mixed-DPI layout measured in #4428 (Chrome stable, Windows 11).
+    fn issue_4428_displays() -> Vec<PhysicalDisplay> {
+        vec![
+            display(6000, 13, 9840, 2173, 1.0),    // DISPLAY1, 100%
+            display(3840, -1000, 6000, 2840, 1.5), // DISPLAY2, 150%
+            display(0, 0, 3840, 2160, 1.0),        // DISPLAY3, primary
+        ]
+    }
+
+    fn assert_cdp_match(actual: Rect, expected: Rect) {
+        assert!(
+            actual.approx_eq(&expected, 2.0),
+            "actual {actual:?} expected CDP {expected:?}"
+        );
+    }
+
+    #[test]
+    fn chromium_dip_layout_matches_measured_cdp_bounds_on_mixed_dpi() {
+        let displays = issue_4428_displays();
+        // Primary, 100%: exact.
+        assert_cdp_match(
+            physical_window_to_chromium_dip((1470, 19, 2356, 2119), &displays, 2).unwrap(),
+            Rect::new(1470.0, 19.0, 2356.0, 2119.0),
+        );
+        // DISPLAY1, 100%, right of the 150% display: x shifted by its lost width.
+        assert_cdp_match(
+            physical_window_to_chromium_dip((6193, 200, 2014, 1507), &displays, 0).unwrap(),
+            Rect::new(5473.0, 195.0, 2014.0, 1507.0),
+        );
+        // DISPLAY2, 150%: monitor origin keeps 3840 DIP, not 3840 / 1.5.
+        assert_cdp_match(
+            physical_window_to_chromium_dip((3943, -800, 2721, 2261), &displays, 1).unwrap(),
+            Rect::new(3909.0, -534.0, 1815.0, 1508.0),
+        );
+    }
+
+    #[test]
+    fn chromium_dip_layout_places_left_top_and_detached_displays() {
+        let displays = vec![
+            display(0, 0, 1920, 1080, 1.0),
+            display(-3840, 0, 0, 2160, 2.0),      // left, 200%
+            display(0, -1440, 2560, 0, 1.0),      // above
+            display(5000, 5000, 6000, 6000, 1.0), // not edge-connected
+        ];
+        let origins = chromium_dip_origins(&displays);
+        assert_eq!(origins[0], Some((0.0, 0.0)));
+        assert_eq!(origins[1], Some((-1920.0, 0.0)));
+        assert_eq!(origins[2], Some((0.0, -1440.0)));
+        assert_eq!(origins[3], None);
+        assert!(physical_window_to_chromium_dip((5100, 5100, 10, 10), &displays, 3).is_none());
+    }
+
+    #[test]
+    fn chromium_dip_layout_without_primary_is_unplaced() {
+        let mut displays = issue_4428_displays();
+        for display in &mut displays {
+            display.primary = false;
+        }
+        assert!(chromium_dip_origins(&displays).iter().all(Option::is_none));
+    }
 
     #[test]
     fn process_fingerprint_uses_manifest_canonical_executable_path() {
@@ -3108,7 +3376,7 @@ mod tests {
             if family == u32::from(AF_INET.0) {
                 Ok(ipv4.clone())
             } else {
-                Err(refusal(
+                Err(BrowserRefusal::new(
                     BrowserRefusalCode::BrowserRouteUnavailable,
                     "IPv6 owner table is unsupported",
                 ))
@@ -3121,7 +3389,7 @@ mod tests {
     #[test]
     fn native_listener_discovery_refuses_when_both_families_fail() {
         let error = windows_loopback_listeners_with(&[42], |family| {
-            Err(refusal(
+            Err(BrowserRefusal::new(
                 BrowserRefusalCode::BrowserRouteUnavailable,
                 format!("family {family} unavailable"),
             ))
@@ -3621,7 +3889,7 @@ mod tests {
         let result = retry_port_ownership(3, Duration::ZERO, 9222, move || {
             probe_calls.fetch_add(1, Ordering::SeqCst);
             async {
-                Err(refusal(
+                Err(BrowserRefusal::new(
                     BrowserRefusalCode::BrowserRouteUnavailable,
                     "socket inventory failed",
                 ))

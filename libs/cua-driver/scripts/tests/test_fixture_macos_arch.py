@@ -6,6 +6,8 @@ import shutil
 import shlex
 import subprocess
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 BUILD_SCRIPT = REPO_ROOT / "libs/cua-driver/tests/fixtures/build/macos.sh"
@@ -15,7 +17,7 @@ def _bash_path(path: Path) -> str:
     if os.name != "nt":
         return str(path)
     drive = path.drive.rstrip(":").lower()
-    return f"/mnt/{drive}/{path.relative_to(path.anchor).as_posix()}"
+    return f"/{drive}/{path.relative_to(path.anchor).as_posix()}"
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -102,7 +104,7 @@ def _run(script: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         assignments = " ".join(f"{key}={shlex.quote(env[key])}" for key in keys if key in env)
         command = f"{assignments} bash {shlex.quote(_bash_path(script))} --only appkit"
         return subprocess.run(
-            ["bash", "-lc", command],
+            [r"C:\Program Files\Git\bin\bash.exe", "-c", command],
             check=False,
             capture_output=True,
             text=True,
@@ -116,14 +118,17 @@ def _run(script: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_fixture_build_targets_and_verifies_intel_host(tmp_path: Path) -> None:
+@pytest.mark.parametrize("arch", ["x86_64", "arm64"])
+def test_fixture_build_targets_and_verifies_host(tmp_path: Path, arch: str) -> None:
     script, env, tool_log = _fixture_tree(tmp_path)
+    env["FAKE_UNAME_ARCH"] = arch
+    env["FAKE_LIPO_ARCHS"] = arch
 
     result = _run(script, env)
 
     assert result.returncode == 0, result.stderr
     calls = tool_log.read_text(encoding="utf-8")
-    assert "-target x86_64-apple-macos13.0" in calls
+    assert f"-target {arch}-apple-macos13.0" in calls
     assert "lipo -archs" in calls
 
 
