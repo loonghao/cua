@@ -689,7 +689,7 @@ pub(crate) fn hostname() -> String {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "this machine".into())
+        .unwrap_or_else(|| "this computer".into())
 }
 
 /// The name a person knows this machine by, for display and as the default
@@ -1405,9 +1405,25 @@ impl Host {
         RelayClient::new(url)?.machine(&token, id).await
     }
 
+    /// Takes `name` as this machine's display name when `machine_id` is
+    /// this machine's relay registration (after the owner renamed it on
+    /// the relay from an enrolled device). Returns whether it did: another
+    /// machine, or a machine not set up, is left alone.
+    pub fn adopt_name(&self, machine_id: &str, name: &str) -> Result<bool> {
+        let Some(mut config) = self.config()? else {
+            return Ok(false);
+        };
+        if config.machine_id.as_deref() != Some(machine_id) || name.trim().is_empty() {
+            return Ok(false);
+        }
+        config.name = name.trim().to_string();
+        write_json(&self.paths.config(), &config)?;
+        Ok(true)
+    }
+
     fn require_config(&self) -> Result<HostConfig> {
         self.config()?.ok_or_else(|| {
-            Error::NotFound("this machine is not set up for access (run `cua host setup`)".into())
+            Error::NotFound("this computer is not set up for access (run `cua host setup`)".into())
         })
     }
 
@@ -1525,7 +1541,7 @@ impl Host {
             && !owned_by(p, account)
         {
             return Err(Error::InvalidArgument(
-                "this machine is shared with another Cua account; remove the host setup \
+                "this computer is shared with another Cua account; remove the host setup \
                  and set it up again to share it with this one"
                     .into(),
             ));
@@ -1560,7 +1576,7 @@ impl Host {
         let mut config = self.require_config()?;
         let (Some(url), Some(id)) = (config.relay_url.clone(), config.machine_id.clone()) else {
             return Err(Error::InvalidArgument(
-                "name and allowlist live on the relay; this machine is in direct mode".into(),
+                "name and allowlist live on the relay; this computer is in direct mode".into(),
             ));
         };
         let token = tokens.access_token().await?;
@@ -1573,6 +1589,7 @@ impl Host {
                     allow: allow.clone(),
                     viewers: None,
                     sharing: None,
+                    meta: None,
                 },
             )
             .await?;
@@ -1639,7 +1656,7 @@ impl Host {
         let provided = crate::provided::load_provided(&self.paths.dir)?;
         if !provided.is_empty() && !uninstalling {
             return Err(Error::InvalidArgument(format!(
-                "this machine still provides {} Space{} ({}); delete {} first (`cua spaces delete <local:name>`)",
+                "this computer still provides {} Space{} ({}); delete {} first (`cua spaces delete <local:name>`)",
                 provided.len(),
                 if provided.len() == 1 { "" } else { "s" },
                 provided
@@ -1679,7 +1696,7 @@ impl Host {
             note(e);
         }
         self.manager_for_config(&config).uninstall()?;
-        std::fs::remove_dir_all(&self.paths.dir)?;
+        remove_dir_retrying(&self.paths.dir).await?;
         match relay_error {
             Some(e) => Err(Error::Relay(format!(
                 "removed locally, but the relay could not be told: {e}"
@@ -1749,6 +1766,23 @@ async fn install_driver(explicit: Option<&Path>, dest: &Path) -> Result<()> {
         DriverSource::Local(_) => {}
     }
     driver::install_to(&source, dest).await
+}
+
+/// `remove_dir_all`, retried for up to 5 s: Windows releases a stopped
+/// driver's files (its exe, driver.log) a moment after it exits (CUA-1749).
+async fn remove_dir_retrying(dir: &Path) -> std::io::Result<()> {
+    let mut tries = 0;
+    loop {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if tries >= 20 => return Err(e),
+            Err(_) => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1891,5 +1925,17 @@ mod tests {
             std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[tokio::test]
+    async fn remove_dir_retrying_removes_and_tolerates_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("host");
+        std::fs::create_dir_all(host.join("bin")).unwrap();
+        std::fs::write(host.join("driver.log"), "x").unwrap();
+        super::remove_dir_retrying(&host).await.unwrap();
+        assert!(!host.exists());
+        // Already gone (removed by another step): not an error.
+        super::remove_dir_retrying(&host).await.unwrap();
     }
 }

@@ -675,10 +675,10 @@ fn evaluate_element(
 
 fn selector_matches(selector: &cua_driver_contract::ElementSelector, element: &Value) -> bool {
     if let Some(role) = selector.role.as_deref() {
-        if !element
+        if element
             .get("role")
             .and_then(Value::as_str)
-            .is_some_and(|actual| normalized_role(actual) == normalized_role(role))
+            .is_none_or(|actual| normalized_role(actual) != normalized_role(role))
         {
             return false;
         }

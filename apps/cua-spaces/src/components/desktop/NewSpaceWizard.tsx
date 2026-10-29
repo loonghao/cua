@@ -10,8 +10,10 @@ import type { Runtime } from "../../model/types";
 import type { CloudPricing, GpuChoice } from "../../native/fleet";
 import type { LocalStorage } from "../../native/local";
 import { telemetryBridge, type TelemetryBridge } from "../../native/telemetry";
+import { hostOs } from "../../model/host";
 import { ImageField, type ImageFieldView } from "./ImageField";
 import { Sym } from "./Sym";
+import { useT } from "../../i18n";
 
 /** What the wizard asks the app to create (the app core's `CreatePlan`). */
 export interface CreatePlan {
@@ -26,7 +28,7 @@ export interface CreatePlan {
    * can run in `placement`. */
   runtime: Runtime;
   name?: string;
-  /** This Mac only: vCPUs and memory. Cua Cloud sizes its own Spaces. */
+  /** This Mac only: vCPUs and memory. */
   cpus?: number;
   memoryMb?: number;
   /** This Mac's VMs only: a disk larger than the image's, in GB. */
@@ -42,7 +44,7 @@ export interface NewSpaceWizardProps {
   /** Where "Run on" starts: the configured default location (Settings,
    * `cua config set default.on`). */
   defaultLocation?: Placement;
-  /** Cua Cloud needs an account (signed in, or client credentials). */
+  /** Cua Cloud has ended: the app passes `false`. */
   cloudAvailable: boolean;
   /** Local needs a container backend (docker / runsc) or Lume. */
   localAvailable: boolean;
@@ -65,7 +67,7 @@ export interface NewSpaceWizardProps {
   hostArch?: string;
   /** Free space where local Spaces are written, and what is pulled. */
   storage?: LocalStorage | null;
-  /** This account's Cua Cloud rates (no cloud estimate without). */
+  /** Cua Cloud rates (always none: it has ended). */
   cloudPricing?: CloudPricing | null;
   /** The GPU option of each runtime that has one (`gpu_support`); a
    * runtime not listed gets no GPU row. */
@@ -270,6 +272,7 @@ export function NewSpaceWizard({
   experiments,
   onConnectCloud,
 }: NewSpaceWizardProps) {
+  const t = useT("spaces");
   const env = useMemo(
     () => ({
       defaultLocation,
@@ -324,7 +327,7 @@ export function NewSpaceWizard({
   useEffect(() => {
     setState((s) => core<WizardState>("wizard.reduce", { state: s, action: { type: "sync-default", location: defaultLocation }, env }));
   }, [defaultLocation, env]);
-  const v = core<WizardView>("wizard.view", { state, env });
+  const v = core<WizardView>("wizard.view", { state, env, hostOs: hostOs() });
   // Before paint, so a quick create never shows the sheet; once, because StrictMode runs mount effects twice.
   const started = useRef(false);
   useLayoutEffect(() => {
@@ -339,7 +342,7 @@ export function NewSpaceWizard({
 
   if (v.mode === "address") {
     return (
-      <div className="dw-sheet" role="dialog" aria-label="Connect by address">
+      <div className="dw-sheet" role="dialog" aria-label={t("spaces.wizard.connect_by_address")}>
         <AddByAddress
           view={v}
           address={state.address as { url: string; token: string; name: string }}
@@ -352,9 +355,9 @@ export function NewSpaceWizard({
   }
 
   return (
-    <div className="dw-sheet" role="dialog" aria-label="New Space">
+    <div className="dw-sheet" role="dialog" aria-label={t("spaces.wizard.label")}>
       <div className="wz">
-        <ol className="wz-steps" aria-label="Steps">
+        <ol className="wz-steps" aria-label={t("spaces.wizard.steps_label")}>
           {v.steps.map((s, index) => (
             <li
               key={s.label}
@@ -481,12 +484,12 @@ export function NewSpaceWizard({
                 )}
               {v.gpu && <GpuField row={v.gpu} dispatch={dispatch} onOpenExternal={onOpenExternal} />}
               {v.price && (
-                <p className="wz-price" aria-label="Cost">
+                <p className="wz-price" aria-label={t("spaces.wizard.cost_label")}>
                   {v.price}
                 </p>
               )}
               {v.resourceFacts.length > 0 && (
-                <dl className="wz-summary" aria-label="Resources">
+                <dl className="wz-summary" aria-label={t("spaces.wizard.resources_label")}>
                   {v.resourceFacts.map((fact) => (
                     <Fragment key={fact.id}>
                       <dt>{fact.label}</dt>
@@ -549,7 +552,7 @@ export function NewSpaceWizard({
           {step === 3 && (
             <div className="wz-stack">
               <h2 className="wz-title">{v.title}</h2>
-              <dl className="wz-summary" aria-label="Summary">
+              <dl className="wz-summary" aria-label={t("spaces.wizard.summary_label")}>
                 {v.summary.map((fact) => (
                   <Fragment key={fact.label}>
                     <dt>{fact.label}</dt>
@@ -777,6 +780,7 @@ function AddByAddress({
   onAdd: (url: string, token?: string, name?: string) => Promise<unknown>;
   onDone: () => void;
 }) {
+  const t = useT("spaces");
   const a = view.address;
   const submit = () => {
     const call = a.submit;
@@ -828,7 +832,7 @@ function AddByAddress({
             />
           </label>
           {view.price && (
-            <p className="wz-price" aria-label="Cost">
+            <p className="wz-price" aria-label={t("spaces.wizard.cost_label")}>
               {view.price}
             </p>
           )}

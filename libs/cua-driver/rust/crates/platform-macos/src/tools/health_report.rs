@@ -177,7 +177,7 @@ fn standalone_bundle_identity(bid: Option<String>, exe: String) -> CheckEntry {
     };
     let hint = "This bundle check does not identify the app or executable macOS attributes \
                 this process's permission request to. For standalone CuaDriver, start the \
-                daemon inside CuaDriver.app with `open -n -g -a CuaDriver --args serve` and \
+                daemon inside CuaDriver.app with `cua-driver permissions grant` and \
                 connect via `cua-driver mcp`. For an embedded or linked driver, use the \
                 host's launch and permission setup instead.";
 
@@ -348,7 +348,7 @@ fn bundle_identifier(bundle: &core_foundation::bundle::CFBundle) -> Option<Strin
 /// Read the running process's `CFBundleIdentifier` via CoreFoundation.
 /// Returns `None` when the process has no associated bundle (e.g.
 /// running the bare binary outside `CuaDriver.app`).
-fn current_bundle_identifier() -> Option<String> {
+pub(crate) fn current_bundle_identifier() -> Option<String> {
     use core_foundation::base::TCFType;
     use core_foundation::bundle::{CFBundle, CFBundleGetMainBundle};
 
@@ -371,7 +371,7 @@ fn current_bundle_identifier() -> Option<String> {
 /// Read in-process from the `kern.osproductversion` sysctl. The previous
 /// implementation spawned `/usr/bin/sw_vers` — a full fork/exec (several
 /// ms) on every health_report call — to read the same value.
-fn sw_vers_product_version() -> Option<String> {
+pub(crate) fn sw_vers_product_version() -> Option<String> {
     let name = std::ffi::CString::new("kern.osproductversion").ok()?;
     let mut buf = [0u8; 64];
     let mut len = buf.len();
@@ -429,7 +429,7 @@ mod tests {
         let seen = windowserver_connection_entry(false, true);
         assert_eq!(seen.status, CheckStatus::Fail);
         assert!(seen.message.contains("1002"));
-        assert!(seen.hint.unwrap().contains("open -n -g -a CuaDriver"));
+        assert!(seen.hint.unwrap().contains("cua-driver permissions grant"));
         assert_eq!(
             windowserver_connection_entry(true, false).status,
             CheckStatus::Fail

@@ -8,12 +8,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 
-#[derive(Debug, Clone)]
-pub struct ProcessInfo {
-    pub pid: u32,
-    pub parent_pid: u32,
-    pub name: String,
-}
+pub use crate::process_selection::ProcessInfo;
+use crate::process_selection::{descendants_from_processes, related_processes_from_processes};
 
 /// Return all running processes (pid, parent_pid, executable name).
 pub fn list_processes() -> Vec<ProcessInfo> {
@@ -67,58 +63,10 @@ pub fn list_descendants(root_pid: u32) -> Vec<u32> {
     descendants_from_processes(root_pid, &all)
 }
 
-fn descendants_from_processes(root_pid: u32, all: &[ProcessInfo]) -> Vec<u32> {
-    let mut result = vec![root_pid];
-    let mut frontier = vec![root_pid];
-    while let Some(parent) = frontier.pop() {
-        for p in all {
-            if p.parent_pid == parent && !result.contains(&p.pid) {
-                result.push(p.pid);
-                frontier.push(p.pid);
-            }
-        }
-    }
-    result
-}
-
-/// Discover descendants and processes sharing an executable-name prefix.
-/// These are discovery candidates, not proof of launch ownership. Retained for
-/// callers of the existing public Win32 API; launch resolution must use
-/// `launched_processes` instead.
-pub fn related_processes(root_pid: u32, exe_basename: &str) -> Vec<u32> {
-    let mut out = list_descendants(root_pid);
-    let prefix = strip_version_suffix(exe_basename);
-    if !prefix.is_empty() {
-        let all = list_processes();
-        for p in &all {
-            let p_prefix = strip_version_suffix(&p.name);
-            if p_prefix.eq_ignore_ascii_case(&prefix) && !out.contains(&p.pid) {
-                out.push(p.pid);
-            }
-        }
-    }
-    out
-}
-
-fn strip_version_suffix(basename: &str) -> String {
-    let mut s = basename.to_ascii_lowercase();
-    if let Some(stripped) = s.strip_suffix(".exe") {
-        s = stripped.to_owned();
-    }
-    let bytes = s.as_bytes();
-    let mut cut = bytes.len();
-    while cut > 0 {
-        let c = bytes[cut - 1] as char;
-        if c.is_ascii_digit() || c == '.' || c == '-' {
-            cut -= 1;
-        } else {
-            break;
-        }
-    }
-    if cut == 0 {
-        return s;
-    }
-    s[..cut].to_string()
+/// Return the launch receipt root and its transitive descendants, root first.
+/// Executable-name similarity does not establish launch ancestry.
+pub fn related_processes(root_pid: u32, _exe_basename: &str) -> Vec<u32> {
+    related_processes_from_processes(root_pid, _exe_basename, &list_processes())
 }
 
 /// Return the launched PID and only its descendants absent before launch.

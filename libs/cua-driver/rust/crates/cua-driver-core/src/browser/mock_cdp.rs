@@ -35,6 +35,7 @@ pub(crate) struct MockReply {
     pub events: Vec<MockEvent>,
     /// Close after the handler ran, before acknowledging the command.
     close_without_reply: bool,
+    pub suppress_response: bool,
     pub result: Result<Value, (i64, String)>,
 }
 
@@ -44,6 +45,7 @@ impl MockReply {
             events: Vec::new(),
             close_without_reply: false,
             result: Ok(result),
+            suppress_response: false,
         }
     }
 
@@ -52,6 +54,7 @@ impl MockReply {
             events: Vec::new(),
             close_without_reply: false,
             result: Err((code, message.to_owned())),
+            suppress_response: false,
         }
     }
 
@@ -128,6 +131,9 @@ impl MockCdpServer {
                         if reply.close_without_reply {
                             let _ = ws.close(None).await;
                             return;
+                        }
+                        if reply.suppress_response {
+                            continue;
                         }
                         for event in reply.events {
                             let mut frame =

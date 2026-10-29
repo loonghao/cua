@@ -13,8 +13,8 @@ use cua_driver_core::browser::{
 use windows::core::{AgileReference, Interface, BSTR};
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
-    SAFEARRAY,
+    CoCreateInstance, CoDecrementMTAUsage, CoIncrementMTAUsage, CoInitializeEx, CoUninitialize,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CO_MTA_USAGE_COOKIE, SAFEARRAY,
 };
 use windows::Win32::System::Ole::{
     SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetElemsize,
@@ -84,7 +84,8 @@ fn native_nodes(hwnd: u64) -> Result<Vec<UiaNode>, BrowserRefusal> {
 
 const MAX_RUNTIME_ID_PARTS: usize = 1024;
 
-struct SetupComScope;
+// CoUninitialize must run on the same thread as CoInitializeEx.
+struct SetupComScope(std::marker::PhantomData<std::rc::Rc<()>>);
 
 impl SetupComScope {
     fn new() -> Result<Self, BrowserRefusal> {
@@ -96,7 +97,7 @@ impl SetupComScope {
                     format!("native setup cleanup COM initialization failed: {error}"),
                 )
             })?;
-        Ok(Self)
+        Ok(Self(std::marker::PhantomData))
     }
 }
 
@@ -105,6 +106,56 @@ impl Drop for SetupComScope {
         unsafe {
             CoUninitialize();
         }
+    }
+}
+
+// A pending setup may move across threads. This process-wide MTA usage cookie
+// keeps its agile UIA references alive without moving a thread-bound COM scope.
+struct SetupMtaUsage(CO_MTA_USAGE_COOKIE);
+
+// CoDecrementMTAUsage explicitly permits consuming its cookie on another thread.
+unsafe impl Send for SetupMtaUsage {}
+
+impl SetupMtaUsage {
+    fn new() -> Result<Self, BrowserRefusal> {
+        unsafe { CoIncrementMTAUsage() }.map(Self).map_err(|error| {
+            refusal(
+                BrowserRefusalCode::BrowserRouteUnavailable,
+                format!("native setup MTA retention failed: {error}"),
+            )
+        })
+    }
+}
+
+impl Drop for SetupMtaUsage {
+    fn drop(&mut self) {
+        if let Err(error) = unsafe { CoDecrementMTAUsage(self.0) } {
+            tracing::warn!(%error, "native setup MTA retention release failed");
+        }
+    }
+}
+
+// Fields drop in declaration order: retained UIA identities before MTA usage.
+struct RetainedSetup<T, U> {
+    owned_tab: Option<T>,
+    _mta_usage: U,
+    new_tab_action_attempted: bool,
+    opened_setup_page: bool,
+}
+
+impl<T, U> RetainedSetup<T, U> {
+    fn new(mta_usage: U) -> Self {
+        Self {
+            owned_tab: None,
+            _mta_usage: mta_usage,
+            new_tab_action_attempted: false,
+            opened_setup_page: false,
+        }
+    }
+
+    fn record_owned_tab(&mut self, tab: T) {
+        self.owned_tab = Some(tab);
+        self.opened_setup_page = true;
     }
 }
 
@@ -1016,6 +1067,18 @@ fn needs_debugging_restore(
     confirmed_enabled || (attempted && initial == Some(CheckboxState::Off))
 }
 
+fn revalidate_rollback_context<T>(
+    window: impl FnOnce() -> Result<(), BrowserRefusal>,
+    owned_tab: Option<&T>,
+    tab: impl FnOnce(&T) -> Result<(), BrowserRefusal>,
+) -> Result<(), BrowserRefusal> {
+    window()?;
+    if let Some(owned) = owned_tab {
+        tab(owned)?;
+    }
+    Ok(())
+}
+
 unsafe fn checkbox_state(element_ptr: usize) -> Result<CheckboxState, BrowserRefusal> {
     let element = IUIAutomationElement::from_raw(element_ptr as *mut _);
     let result = element
@@ -1052,13 +1115,24 @@ unsafe fn toggle(element_ptr: usize) -> Result<(), BrowserRefusal> {
     })
 }
 
+fn with_cleanup_scope<T, S, R, E>(
+    value: T,
+    scope: impl FnOnce() -> Result<S, E>,
+    cleanup: impl FnOnce(&mut T) -> R,
+) -> Result<R, E> {
+    let _scope = scope()?;
+    // Declare the owned value after the guard so unwinding preserves this order too.
+    let mut value = value;
+    let result = cleanup(&mut value);
+    drop(value);
+    Ok(result)
+}
+
 pub struct SetupUiHandle {
     hwnd: u64,
     window_identity: SetupWindowIdentity,
-    owned_tab: Option<OwnedSetupTab>,
-    new_tab_action_attempted: bool,
+    ownership: RetainedSetup<OwnedSetupTab, SetupMtaUsage>,
     descriptor: &'static BrowserSetupDescriptor,
-    pub opened_setup_page: bool,
     pub enabled_remote_debugging: bool,
     pub focused_setup_address_field: bool,
     pub foregrounded_window: bool,
@@ -1068,6 +1142,17 @@ pub struct SetupUiHandle {
 }
 
 impl SetupUiHandle {
+    pub fn opened_setup_page(&self) -> bool {
+        self.ownership.opened_setup_page
+    }
+
+    fn revalidate_rollback_context(&self) -> Result<(), BrowserRefusal> {
+        revalidate_rollback_context(
+            || self.window_identity.revalidate(),
+            self.ownership.owned_tab.as_ref(),
+            |owned| owned.active(self.window_identity),
+        )
+    }
     fn rollback_remote_debugging(&mut self) -> bool {
         if !needs_debugging_restore(
             self.enabled_remote_debugging,
@@ -1085,17 +1170,14 @@ impl SetupUiHandle {
         if self.initial_debugging_state != Some(CheckboxState::Off) {
             return false;
         }
-        let Some(owned) = self.owned_tab.as_ref() else {
-            return false;
-        };
-        if owned.active(self.window_identity).is_err() {
+        if self.revalidate_rollback_context().is_err() {
             return false;
         }
         let tree = crate::uia::walk_tree(self.hwnd, None);
         let checkbox = exact_setup_checkbox(&tree.nodes, self.descriptor);
         let observed = match checkbox {
             Ok(Some(element)) => unsafe {
-                if owned.active(self.window_identity).is_err() {
+                if self.revalidate_rollback_context().is_err() {
                     None
                 } else {
                     match checkbox_state(element) {
@@ -1109,10 +1191,13 @@ impl SetupUiHandle {
         };
         release_nodes(&tree.nodes);
         if observed == Some(true) {
+            if self.revalidate_rollback_context().is_err() {
+                return false;
+            }
             self.enabled_remote_debugging = false;
             return true;
         }
-        if observed.is_none() || owned.active(self.window_identity).is_err() {
+        if observed.is_none() || self.revalidate_rollback_context().is_err() {
             return false;
         }
         let readback = crate::uia::walk_tree(self.hwnd, None);
@@ -1121,7 +1206,7 @@ impl SetupUiHandle {
                 checkbox.is_some_and(|element| unsafe {
                     matches!(checkbox_state(element), Ok(CheckboxState::Off))
                 })
-            }) && owned.active(self.window_identity).is_ok();
+            }) && self.revalidate_rollback_context().is_ok();
         release_nodes(&readback.nodes);
         if restored {
             self.enabled_remote_debugging = false;
@@ -1129,8 +1214,18 @@ impl SetupUiHandle {
         restored
     }
 
-    pub fn abort(mut self, error: BrowserRefusal) -> BrowserRefusal {
-        self.abort_with_cleanup(error, None)
+    pub fn abort(self, error: BrowserRefusal) -> BrowserRefusal {
+        let mut original = error.clone();
+        with_cleanup_scope(self, SetupComScope::new, |handle| {
+            handle.abort_with_cleanup(error, None)
+        })
+        .unwrap_or_else(|cleanup_error| {
+            let cause = original.detail.take();
+            original.with_detail(serde_json::json!({
+                "cause": cause,
+                "setup_cleanup_refusal": cleanup_error.message,
+            }))
+        })
     }
 
     fn abort_with_cleanup(
@@ -1140,7 +1235,7 @@ impl SetupUiHandle {
     ) -> BrowserRefusal {
         let enabled_remote_debugging = self.enabled_remote_debugging;
         let restored_remote_debugging = self.rollback_remote_debugging();
-        let opened_setup_page = self.opened_setup_page;
+        let opened_setup_page = self.ownership.opened_setup_page;
         let focused_setup_address_field = self.focused_setup_address_field;
         let foregrounded_window = self.foregrounded_window;
         let injected_global_input = self.injected_global_input;
@@ -1149,7 +1244,7 @@ impl SetupUiHandle {
         let cleanup_status = match &cleanup {
             Ok(Some(true)) => "verified_closed",
             Ok(Some(false)) => "unconfirmed",
-            Ok(None) if self.new_tab_action_attempted => "creation_unproven",
+            Ok(None) if self.ownership.new_tab_action_attempted => "creation_unproven",
             Ok(None) => "not_opened",
             Err(_) => "refused",
         };
@@ -1166,8 +1261,8 @@ impl SetupUiHandle {
                 "injected_global_input": injected_global_input,
                 "restored_remote_debugging": restored_remote_debugging,
                 "remote_debugging_restore_unconfirmed": self.enable_attempted && self.initial_debugging_state == Some(CheckboxState::Off) && !restored_remote_debugging,
-                "owned_setup_tab_identified": self.owned_tab.is_some(),
-                "setup_tab_creation_unproven": self.new_tab_action_attempted && !opened_setup_page && self.owned_tab.is_none(),
+                "owned_setup_tab_identified": self.ownership.owned_tab.is_some(),
+                "setup_tab_creation_unproven": self.ownership.new_tab_action_attempted && !opened_setup_page && self.ownership.owned_tab.is_none(),
                 "setup_tab_cleanup_status": cleanup_status,
                 "setup_tab_cleanup_refusal": cleanup_refusal,
             },
@@ -1175,41 +1270,46 @@ impl SetupUiHandle {
         }))
     }
 
-    pub fn close_for_success(mut self) -> Result<Option<bool>, BrowserRefusal> {
-        match self.close_owned_tab() {
-            Ok(Some(false)) => Err(self.abort_with_cleanup(
-                refusal(
-                    BrowserRefusalCode::BrowserBindingStale,
-                    "the owned native setup tab did not disappear in a complete readback",
-                ),
-                Some(Ok(Some(false))),
-            )),
-            Err(error) => {
-                let cleanup_error = error.clone();
-                Err(self.abort_with_cleanup(error, Some(Err(cleanup_error))))
+    pub fn close_for_success(self) -> Result<Option<bool>, BrowserRefusal> {
+        with_cleanup_scope(self, SetupComScope::new, |handle| {
+            match handle.close_owned_tab() {
+                Ok(Some(false)) => Err(handle.abort_with_cleanup(
+                    refusal(
+                        BrowserRefusalCode::BrowserBindingStale,
+                        "the owned native setup tab did not disappear in a complete readback",
+                    ),
+                    Some(Ok(Some(false))),
+                )),
+                Err(error) => {
+                    let cleanup_error = error.clone();
+                    Err(handle.abort_with_cleanup(error, Some(Err(cleanup_error))))
+                }
+                result => result,
             }
-            result => result,
-        }
+        })?
     }
 
     fn close_owned_tab(&mut self) -> Result<Option<bool>, BrowserRefusal> {
-        if !self.opened_setup_page {
+        if !self.ownership.opened_setup_page {
             return Ok(None);
         }
         let owned =
-            self.owned_tab.as_ref().ok_or_else(|| {
+            self.ownership.owned_tab.as_ref().ok_or_else(|| {
                 refusal(BrowserRefusalCode::BrowserBindingAmbiguous,
             "the newly opened setup tab has no independently retained native ownership proof")
             })?;
         let closed = owned.close(self.window_identity)?;
         if closed {
-            self.opened_setup_page = false;
+            self.ownership.opened_setup_page = false;
         }
         Ok(Some(closed))
     }
 
-    pub fn close(mut self) -> Option<bool> {
-        self.close_owned_tab().unwrap_or(Some(false))
+    pub fn close(self) -> Option<bool> {
+        with_cleanup_scope(self, SetupComScope::new, |handle| {
+            handle.close_owned_tab().unwrap_or(Some(false))
+        })
+        .unwrap_or(Some(false))
     }
 }
 
@@ -1260,6 +1360,7 @@ fn set_remote_debugging(
     desired_enabled: bool,
 ) -> Result<SetupUiHandle, BrowserRefusal> {
     let _com = SetupComScope::new()?;
+    let mta_usage = SetupMtaUsage::new()?;
     let window_identity = SetupWindowIdentity::capture(hwnd)?;
     let initial_native = native_nodes(hwnd)?;
     let setup_page_active = needs_setup_page_renderer(&initial_native, descriptor);
@@ -1277,10 +1378,8 @@ fn set_remote_debugging(
         Ok(Some(_)) => SetupUiHandle {
             hwnd,
             window_identity,
-            owned_tab: None,
-            new_tab_action_attempted: false,
+            ownership: RetainedSetup::new(mta_usage),
             descriptor,
-            opened_setup_page: false,
             enabled_remote_debugging: false,
             focused_setup_address_field: false,
             foregrounded_window: false,
@@ -1294,10 +1393,8 @@ fn set_remote_debugging(
             let mut handle = SetupUiHandle {
                 hwnd,
                 window_identity,
-                owned_tab: None,
-                new_tab_action_attempted: false,
+                ownership: RetainedSetup::new(mta_usage),
                 descriptor,
-                opened_setup_page: false,
                 enabled_remote_debugging: false,
                 focused_setup_address_field: false,
                 foregrounded_window: false,
@@ -1361,7 +1458,7 @@ fn set_remote_debugging(
                 release_nodes(&tab_tree);
                 return Err(handle.abort(error));
             }
-            handle.new_tab_action_attempted = true;
+            handle.ownership.new_tab_action_attempted = true;
             let invocation = unsafe { invoke(new_tab_button, "native new-tab button") };
             release_nodes(&tab_tree);
             // A failed Invoke can have an unknown side effect. It cannot
@@ -1369,8 +1466,6 @@ fn set_remote_debugging(
             if let Err(error) = invocation {
                 return Err(handle.abort(error));
             }
-            handle.opened_setup_page = true;
-
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut created = loop {
                 let tree = match native_nodes(hwnd) {
@@ -1392,8 +1487,7 @@ fn set_remote_debugging(
                         let owned = OwnedSetupTab::capture(&tree, index, owned_window);
                         match owned {
                             Ok(owned) => {
-                                handle.owned_tab = Some(owned);
-                                handle.opened_setup_page = true;
+                                handle.ownership.record_owned_tab(owned);
                                 break tree;
                             }
                             Err(error) => {
@@ -1492,7 +1586,7 @@ fn set_remote_debugging(
             return Err(error);
         }
     };
-    if !handle.opened_setup_page {
+    if !handle.ownership.opened_setup_page {
         release_nodes(&initial);
     }
 
@@ -1572,10 +1666,154 @@ mod tests {
     use super::*;
     use cua_driver_core::browser::{existing_profile_setup_descriptor, BrowserProduct};
 
+    #[test]
+    fn owned_cleanup_values_drop_before_scope_on_success_error_and_unwind() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        struct Tracked(&'static str, Rc<RefCell<Vec<&'static str>>>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.1.borrow_mut().push(self.0);
+            }
+        }
+        for mode in 0..3 {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let owned = Tracked("owned", events.clone());
+            let scope_events = events.clone();
+            let cleanup_events = events.clone();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_cleanup_scope(
+                    owned,
+                    || Ok::<_, ()>(Tracked("scope", scope_events)),
+                    |_| {
+                        cleanup_events.borrow_mut().push("cleanup");
+                        match mode {
+                            0 => Ok(()),
+                            1 => Err(()),
+                            _ => panic!("simulated cleanup unwind"),
+                        }
+                    },
+                )
+            }));
+            match mode {
+                0 => assert_eq!(outcome.unwrap(), Ok(Ok(()))),
+                1 => assert_eq!(outcome.unwrap(), Ok(Err(()))),
+                _ => assert!(outcome.is_err()),
+            }
+            assert_eq!(*events.borrow(), ["cleanup", "owned", "scope"]);
+        }
+    }
+    #[test]
+    fn retained_setup_drops_owned_tab_before_mta_usage_on_another_thread() {
+        use std::sync::{Arc, Mutex};
+
+        struct Tracked(&'static str, Arc<Mutex<Vec<&'static str>>>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().push(self.0);
+            }
+        }
+
+        fn assert_send<T: Send>() {}
+        assert_send::<SetupUiHandle>();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut retained = RetainedSetup::new(Tracked("mta", events.clone()));
+        retained.record_owned_tab(Tracked("tab", events.clone()));
+        std::thread::spawn(move || drop(retained)).join().unwrap();
+        assert_eq!(*events.lock().unwrap(), ["tab", "mta"]);
+    }
+
+    #[test]
+    fn retained_setup_drops_identity_before_usage_when_cleanup_scope_refuses() {
+        use std::sync::{Arc, Mutex};
+
+        struct Tracked(&'static str, Arc<Mutex<Vec<&'static str>>>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.1.lock().unwrap().push(self.0);
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut retained = RetainedSetup::new(Tracked("mta", events.clone()));
+        retained.record_owned_tab(Tracked("tab", events.clone()));
+        let result = with_cleanup_scope(
+            retained,
+            || Err::<(), _>("COM unavailable"),
+            |_| panic!("cleanup must not run without its COM scope"),
+        );
+        assert_eq!(result, Err("COM unavailable"));
+        assert_eq!(*events.lock().unwrap(), ["tab", "mta"]);
+    }
+
+    #[test]
+    fn setup_tab_is_unproven_until_owned_identity_is_captured() {
+        let mut retained = RetainedSetup::<(), _>::new(());
+        retained.new_tab_action_attempted = true;
+        assert!(!retained.opened_setup_page);
+        assert!(retained.owned_tab.is_none());
+
+        retained.record_owned_tab(());
+        assert!(retained.opened_setup_page);
+        assert!(retained.owned_tab.is_some());
+    }
+
     fn descriptor() -> &'static BrowserSetupDescriptor {
         existing_profile_setup_descriptor(BrowserProduct::GoogleChrome).unwrap()
     }
 
+    #[test]
+    fn existing_setup_page_rollback_requires_window_identity_without_an_owned_tab() {
+        let checks = std::cell::Cell::new(0);
+        assert!(revalidate_rollback_context(
+            || {
+                checks.set(checks.get() + 1);
+                Ok(())
+            },
+            None::<&()>,
+            |_| panic!("an existing page has no driver-created tab"),
+        )
+        .is_ok());
+        assert_eq!(checks.get(), 1);
+        assert!(revalidate_rollback_context(
+            || Err(refusal(
+                BrowserRefusalCode::BrowserBindingStale,
+                "window changed"
+            )),
+            None::<&()>,
+            |_| panic!("window failure must stop tab validation"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn created_setup_tab_rollback_still_requires_live_owned_identity() {
+        let checks = std::cell::Cell::new(0);
+        assert!(revalidate_rollback_context(
+            || {
+                checks.set(1);
+                Ok(())
+            },
+            Some(&()),
+            |_| {
+                assert_eq!(checks.get(), 1);
+                checks.set(2);
+                Ok(())
+            },
+        )
+        .is_ok());
+        assert_eq!(checks.get(), 2);
+        assert!(revalidate_rollback_context(
+            || Ok(()),
+            Some(&()),
+            |_| Err(refusal(
+                BrowserRefusalCode::BrowserBindingStale,
+                "owned tab changed"
+            )),
+        )
+        .is_err());
+    }
     #[test]
     fn failed_toggle_that_changed_state_still_requires_proven_rollback() {
         let mut attempted = false;

@@ -23,34 +23,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces and agents available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces and agents available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[ ] Cua Volume ~Shared folder: files your agents can share across your computers. -> Turn on (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -76,8 +75,8 @@
         "- notch choice: Spaces tab in the notch {*Show|Hide}",
         "- welcome text: Welcome [Show again]",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [],
@@ -134,35 +133,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,Cua Volume,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,Cua Volume,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces, agents and Cua Volume available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces, agents and Cua Volume available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "Cua Volume: In Finder",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[x] Cua Volume ~Shared folder: files your agents can share across your computers. In Finder. (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -194,8 +191,8 @@
         "- mount choice: Add Cua Volume to Finder {*On|Off}",
         "- mount-path text: In Finder at = ~/Cua Volume [Show in Finder] ?/Users/maya/Cua Volume < /Users/maya/Cua Volume>",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [
@@ -265,35 +262,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,Cua Volume,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,Cua Volume,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces, agents and Cua Volume available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces, agents and Cua Volume available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "Cua Volume: In Finder",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[x] Cua Volume ~Shared folder: files your agents can share across your computers. In Finder. (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -325,8 +320,8 @@
         "- mount choice: Add Cua Volume to Finder {*On|Off}",
         "- mount-path text: In Finder at = ~/Cua Volume [Show in Finder] ?/Users/maya/Cua Volume < /Users/maya/Cua Volume>",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [
@@ -400,35 +395,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,Cua Volume,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,Cua Volume,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces, agents and Cua Volume available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces, agents and Cua Volume available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "Cua Volume: In Finder",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[x] Cua Volume ~Shared folder: files your agents can share across your computers. In Finder. (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -460,8 +453,8 @@
         "- mount choice: Add Cua Volume to Finder {*On|Off}",
         "- mount-path text: In Finder at = ~/Cua Volume [Show in Finder] ?/Users/maya/Cua Volume < /Users/maya/Cua Volume>",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [],
@@ -521,35 +514,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,Cua Volume,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,Cua Volume,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces, agents and Cua Volume available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces, agents and Cua Volume available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "Cua Volume: In Finder",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[x] Cua Volume ~Shared folder: files your agents can share across your computers. In Finder. (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -581,8 +572,8 @@
         "- mount choice: Add Cua Volume to Finder {*On|Off}",
         "- mount-path text: In Finder at = ~/Cua Volume [Show in Finder] ?/Users/maya/Cua Volume < /Users/maya/Cua Volume>",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [],
@@ -642,35 +633,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,Cua Volume,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,Cua Volume,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces, agents and Cua Volume available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces, agents and Cua Volume available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "Cua Volume: In Finder",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[x] Cua Volume ~Shared folder: files your agents can share across your computers. In Finder. (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -702,8 +691,8 @@
         "- mount choice: Add Cua Volume to Finder {*On|Off}",
         "- mount-path text: In Finder at = ~/Cua Volume [Show in Finder] ?/Users/maya/Cua Volume < /Users/maya/Cua Volume>",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [],
@@ -762,34 +751,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces and agents available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces and agents available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[ ] Cua Volume ~Shared folder: files your agents can share across your computers. -> Turn on (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -815,8 +803,8 @@
         "- notch choice: Spaces tab in the notch {*Show|Hide}",
         "- welcome text: Welcome [Show again]",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [
@@ -888,34 +876,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces and agents available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces and agents available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[ ] Cua Volume ~Shared folder: files your agents can share across your computers. -> Turn on (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -941,8 +928,8 @@
         "- notch choice: Spaces tab in the notch {*Show|Hide}",
         "- welcome text: Welcome [Show again]",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [
@@ -1009,34 +996,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces and agents available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces and agents available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[ ] Cua Volume ~Shared folder: files your agents can share across your computers. -> Turn on (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -1062,8 +1048,8 @@
         "- notch choice: Spaces tab in the notch {*Show|Hide}",
         "- welcome text: Welcome [Show again]",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [
@@ -1128,34 +1114,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces and agents available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces and agents available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[ ] Cua Volume ~Shared folder: files your agents can share across your computers. -> Turn on (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -1181,8 +1166,8 @@
         "- notch choice: Spaces tab in the notch {*Show|Hide}",
         "- welcome text: Welcome [Show again]",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [
@@ -1249,34 +1234,33 @@
           "canBack": true,
           "canSkip": false,
           "choices": [],
-          "dots": "Welcome,Sign in,AI agents,Menu bar,This machine,*Done",
+          "dots": "Welcome,Sign in,AI agents,Menu bar,This computer,*Done",
           "drive": null,
           "driveStorage": null,
-          "launchAtLogin": "[ ] Launch at login ~Keeps your Spaces and agents available after a restart.",
-          "lede": "Cua Spaces is in your menu bar.",
+          "launchAtLogin": "[x] Launch at login ~Keeps your Spaces and agents available after a restart.",
+          "lede": "3 things are left. You can finish them now, or later from the menu bar.",
           "notice": null,
           "noticeLink": null,
           "presentations": [],
           "primary": "Start using Cua Spaces",
           "prompts": [
-            "qa my app on windows, macos and linux",
-            "use the cua sdk to build an agent app that runs codex in a space",
-            "open my app in a space and pip it",
-            "use the cua sdk to stream a space's window into my app",
-            "teleport my browser into a space and finish the checkout test",
-            "use the cua docs to set up a cua bench taskset",
-            "spin up a linux space and run the test suite there"
+            "Open a Linux Space and run my test suite in it",
+            "Use my Space's browser to finish the checkout test and show me",
+            "Share this Space with a teammate as a viewer"
           ],
           "showMark": false,
           "step": "done",
           "summary": [
-            "cua command: not installed",
-            "Account: not signed in",
-            "AI agents: none",
             "Shows in: Notch and menu bar",
-            "This machine: Access other machines"
+            "This computer: Opens your other computers"
           ],
-          "title": "You're all set",
+          "title": "Almost done",
+          "todos": [
+            "[ ] Cua CLI ~Command-line tools for you and your agents. -> Install the Cua CLI",
+            "[ ] Account ~Reach your computers from any device. -> Sign in",
+            "[ ] AI agents ~Let Claude Code, Codex and others use Cua. -> Connect an AI agent",
+            "[ ] Cua Volume ~Shared folder: files your agents can share across your computers. -> Turn on (optional)"
+          ],
           "usage": null
         },
         "pages": [
@@ -1302,8 +1286,8 @@
         "- notch choice: Spaces tab in the notch {*Show|Hide}",
         "- welcome text: Welcome [Show again]",
         "# Privacy (privacy)",
-        "- telemetry choice: Share anonymous usage data {*On|Off}",
-        "- telemetry-note note: Features used, sandbox types, durations and error categories. Never paths, names, prompts, screen content or Keyvault items. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
+        "- telemetry choice: Share usage data to help improve Cua {*On|Off}",
+        "- telemetry-note note: Which features you use and when something goes wrong. Linked to your account through a random ID while you're signed in. Never your files, what you type or your screen. <What is collected https://cua.ai/docs/cua-sdk/concepts/telemetry>",
         "# AI agents (agents) [Configure all detected agents] (disabled)"
       ],
       "signals": [

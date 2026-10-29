@@ -29,7 +29,7 @@ use super::pointer::BrowserPointerTool;
 use super::refusal::BrowserRefusal;
 use super::tools::{
     browser_protected_resource_scope, BrowserClickTool, BrowserNavigateTool, BrowserPrepareTool,
-    BrowserSetInputFilesTool, BrowserTypeTool, GetBrowserStateTool,
+    BrowserSelectTool, BrowserSetInputFilesTool, BrowserTypeTool, GetBrowserStateTool,
 };
 use super::types::{
     BrowserClassification, BrowserEngineFamily, BrowserProcessRole, BrowserProduct,
@@ -60,6 +60,7 @@ pub(super) struct FixtureState {
     completed_key_pairs: usize,
     semantic_large_page: bool,
     semantic_scoped_rows: bool,
+    semantic_html_style: String,
     semantic_full_dom_fails: bool,
     semantic_full_dom_times_out: bool,
     semantic_truncated_dom: bool,
@@ -70,6 +71,7 @@ pub(super) struct FixtureState {
     viewport_css_width: f64,
     viewport_css_height: f64,
     tab_visible: bool,
+    select_outcome: Value,
     /// Extra page targets Chromium reports but cannot map to any browser
     /// window (`Browser.getWindowForTarget` → `-32000 Browser window not
     /// found`): an extension side panel, an offscreen document.
@@ -87,8 +89,15 @@ pub(super) struct FixtureState {
     readback_fails: bool,
     readback_never_settles: bool,
     readback_reloads_document: bool,
+    readback_changes_fragment: bool,
     target_present: bool,
     drift_after_readback: bool,
+    dom_click_changes_readback: bool,
+    dom_click_readback_available: bool,
+    dom_click_stall_after: Option<usize>,
+    dom_click_generation: u64,
+    dom_click_focused: bool,
+    dom_click_reads_before_failure: Option<usize>,
     /// Every incoming CDP call: (sessionId, method, params).
     calls: Vec<(Option<String>, String, Value)>,
 }
@@ -114,6 +123,7 @@ impl Default for FixtureState {
             completed_key_pairs: 0,
             semantic_large_page: false,
             semantic_scoped_rows: false,
+            semantic_html_style: String::new(),
             semantic_full_dom_fails: false,
             semantic_full_dom_times_out: false,
             semantic_truncated_dom: false,
@@ -133,8 +143,16 @@ impl Default for FixtureState {
             readback_fails: false,
             readback_never_settles: false,
             readback_reloads_document: false,
+            readback_changes_fragment: false,
             target_present: true,
             drift_after_readback: false,
+            select_outcome: Value::Null,
+            dom_click_changes_readback: true,
+            dom_click_readback_available: true,
+            dom_click_stall_after: None,
+            dom_click_generation: 0,
+            dom_click_focused: false,
+            dom_click_reads_before_failure: None,
             calls: Vec::new(),
         }
     }
@@ -304,7 +322,7 @@ fn hidden_file_input_ax_tree(frame_id: &str) -> Value {
 
 /// Large application document used to prove that hidden retained controls do
 /// not consume the semantic snapshot budget ahead of the active view.
-fn large_semantic_document() -> Value {
+fn large_semantic_document(html_style: &str) -> Value {
     let mut children = Vec::new();
     for id in 0..320_i64 {
         children.push(json!({
@@ -372,6 +390,7 @@ fn large_semantic_document() -> Value {
                 "nodeType": 1,
                 "nodeName": "HTML",
                 "backendNodeId": 999,
+                "attributes": ["style", html_style],
                 "children": children,
             }]
         }
@@ -743,13 +762,24 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 st.tab_sessions += 1;
                 MockReply::ok(json!({ "sessionId": format!("tab-sess-{}", st.tab_sessions) }))
             }
-            "Page.getFrameTree" if is_tab => MockReply::ok(json!({
+            "Page.getFrameTree" if is_tab => {
+                let (url, fragment) = st
+                    .main_url
+                    .split_once('#')
+                    .map_or((st.main_url.as_str(), None), |(url, fragment)| {
+                        (url, Some(format!("#{fragment}")))
+                    });
+                let mut frame = json!({
+                    "id": "F_MAIN",
+                    "loaderId": st.main_loader.clone(),
+                    "url": url,
+                });
+                if let Some(fragment) = fragment {
+                    frame["urlFragment"] = json!(fragment);
+                }
+                MockReply::ok(json!({
                 "frameTree": {
-                    "frame": {
-                        "id": "F_MAIN",
-                        "loaderId": st.main_loader.clone(),
-                        "url": st.main_url.clone(),
-                    },
+                    "frame": frame,
                     "childFrames": [{
                         "frame": {
                             "id": "F_IFRAME",
@@ -759,7 +789,8 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                         }
                     }]
                 }
-            })),
+                }))
+            }
             "Page.getFrameTree" if is_oopif => MockReply::ok(json!({
                 "frameTree": {
                     "frame": {
@@ -786,7 +817,7 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     } else if st.semantic_scoped_rows {
                         scoped_rows_semantic_document("F_MAIN")
                     } else if st.semantic_large_page {
-                        large_semantic_document()
+                        large_semantic_document(&st.semantic_html_style)
                     } else {
                         main_document()
                     })
@@ -794,7 +825,7 @@ fn fixture_handler(state: SharedState) -> MockHandler {
             }
             "DOM.describeNode" if is_tab && call.params["backendNodeId"] == 999 => {
                 MockReply::ok(json!({
-                    "node": large_semantic_document()["root"]["children"][0].clone()
+                    "node": large_semantic_document(&st.semantic_html_style)["root"]["children"][0].clone()
                 }))
             }
             "DOM.describeNode" if is_tab && call.params["backendNodeId"] == 51 => {
@@ -948,11 +979,20 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 if st.drift_after_readback {
                     st.target_present = false;
                 }
+                let current_url = st
+                    .navigation_readback_url
+                    .as_deref()
+                    .unwrap_or(&st.main_url)
+                    .to_owned();
+                if st.readback_changes_fragment {
+                    let url = st.main_url.split('#').next().unwrap_or_default();
+                    st.main_url = format!("{url}#changed");
+                }
                 MockReply::ok(json!({
                     "result": {
                         "type": "string",
                         "value": serde_json::to_string(&json!({
-                            "current_url": st.navigation_readback_url.as_deref().unwrap_or(&st.main_url),
+                            "current_url": current_url,
                             "title": "Foreground fixture",
                             "heading": "Activated tab",
                             "visibility_state": visible,
@@ -1059,7 +1099,51 @@ fn fixture_handler(state: SharedState) -> MockHandler {
             "DOM.resolveNode" => MockReply::ok(json!({
                 "object": { "objectId": format!("obj-{}", call.params["backendNodeId"]) }
             })),
-            "Runtime.callFunctionOn" => MockReply::ok(json!({ "result": { "value": true } })),
+            "Runtime.callFunctionOn"
+                if call.params["functionDeclaration"]
+                    .as_str()
+                    .is_some_and(|declaration| declaration.contains("HTMLSelectElement")) =>
+            {
+                MockReply::ok(json!({ "result": { "value": st.select_outcome.clone() } }))
+            }
+            "Runtime.callFunctionOn"
+                if call.params["functionDeclaration"]
+                    .as_str()
+                    .is_some_and(|function| function.contains("ariaPressed")) =>
+            {
+                if let Some(remaining) = st.dom_click_stall_after.as_mut() {
+                    if *remaining == 0 {
+                        let mut reply = MockReply::ok(json!({}));
+                        reply.suppress_response = true;
+                        return reply;
+                    }
+                    *remaining -= 1;
+                }
+                if let Some(remaining) = st.dom_click_reads_before_failure.as_mut() {
+                    if *remaining == 0 {
+                        return MockReply::err(-32000, "execution context destroyed");
+                    }
+                    *remaining -= 1;
+                }
+                if !st.dom_click_readback_available {
+                    return MockReply::err(-32000, "semantic click readback unavailable");
+                }
+                assert!(!call.params["functionDeclaration"]
+                    .as_str()
+                    .unwrap()
+                    .contains("activeElement"));
+                let value = json!({
+                    "innerText": format!("counter={}", st.dom_click_generation)
+                });
+                MockReply::ok(json!({ "result": { "value": value } }))
+            }
+            "Runtime.callFunctionOn" => {
+                st.dom_click_focused = true;
+                if st.dom_click_changes_readback {
+                    st.dom_click_generation += 1;
+                }
+                MockReply::ok(json!({ "result": { "value": true } }))
+            }
             other => MockReply::method_not_found(other),
         }
     })
@@ -1675,10 +1759,12 @@ async fn approved_existing_profile_tools_stay_within_the_reviewed_cdp_surface() 
         }))
         .await;
     assert_eq!(
-        structured(&clicked)["status"],
-        "ok",
-        "{}",
-        structured(&clicked)
+        clicked
+            .action_record
+            .as_ref()
+            .expect("click action record")
+            .effect,
+        crate::action_record::ActionEffect::Confirmed
     );
     let typed = BrowserTypeTool::new(f.engine.clone())
         .invoke(json!({
@@ -2324,6 +2410,117 @@ async fn semantic_snapshot_can_capture_an_inactive_tab_without_activation_calls(
 }
 
 #[tokio::test]
+async fn semantic_background_tab_without_layout_reports_not_rendered() {
+    let visible = fixture_with(|st| st.oopif_present = false).await;
+    let (target, tab) = bind(&visible).await;
+    let visible_snap = semantic_snapshot(&visible, &target, &tab).await;
+
+    let f = fixture_with(|st| {
+        st.oopif_present = false;
+        st.tab_visible = false;
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let snap = semantic_snapshot(&f, &target, &tab).await;
+
+    assert_eq!(snap["status"], "ok", "{snap}");
+    assert_eq!(snap["snapshot"]["complete"], false, "{snap}");
+    assert_eq!(snap["snapshot"]["omitted"]["not_rendered"], 1, "{snap}");
+    assert!(snap["snapshot"]["hint"].is_string(), "{snap}");
+    assert_eq!(snap["outline"], visible_snap["outline"]);
+    let without_ref_ids = |refs: &Value| {
+        let mut refs = refs.clone();
+        for entry in refs.as_array_mut().unwrap() {
+            entry.as_object_mut().unwrap().remove("ref");
+        }
+        refs
+    };
+    assert_eq!(
+        without_ref_ids(&snap["refs"]),
+        without_ref_ids(&visible_snap["refs"])
+    );
+    assert_eq!(
+        without_ref_ids(&snap["content_refs"]),
+        without_ref_ids(&visible_snap["content_refs"])
+    );
+    for method in [
+        "Page.bringToFront",
+        "Target.activateTarget",
+        "Page.setWebLifecycleState",
+        "Emulation.setFocusEmulationEnabled",
+    ] {
+        assert!(recorded_calls(&f, method).is_empty(), "{method} was called");
+    }
+}
+
+#[tokio::test]
+async fn semantic_background_tab_with_layout_is_not_flagged() {
+    let f = fixture_with(|st| {
+        st.semantic_large_page = true;
+        st.tab_visible = false;
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let snap = semantic_snapshot(&f, &target, &tab).await;
+
+    assert_eq!(snap["status"], "ok", "{snap}");
+    assert_eq!(snap["snapshot"]["omitted"]["not_rendered"], 0, "{snap}");
+    assert_eq!(snap["snapshot"]["hint"], Value::Null, "{snap}");
+    assert_eq!(snap["snapshot"]["omitted"]["css_hidden"], 320);
+    assert!(recorded_calls(&f, "Runtime.evaluate").is_empty());
+}
+
+#[tokio::test]
+async fn semantic_background_tab_with_faded_in_wrapper_is_not_flagged() {
+    let f = fixture_with(|st| {
+        st.semantic_large_page = true;
+        st.semantic_html_style = "opacity: 0.98; transition: opacity 0.3s".into();
+        st.oopif_present = false;
+        st.tab_visible = false;
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let snap = semantic_snapshot(&f, &target, &tab).await;
+
+    assert_eq!(snap["status"], "ok", "{snap}");
+    assert_eq!(snap["snapshot"]["omitted"]["not_rendered"], 0, "{snap}");
+    assert_eq!(snap["snapshot"]["omitted"]["css_hidden"], 320, "{snap}");
+    let outline = snap["outline"].as_str().unwrap();
+    assert!(outline.contains("Reply body"), "{outline}");
+    assert!(!outline.contains("Retained control"), "{outline}");
+}
+
+#[tokio::test]
+async fn semantic_background_tab_with_rendered_oopif_is_not_flagged() {
+    let f = fixture_with(|st| st.tab_visible = false).await;
+    let (target, tab) = bind(&f).await;
+    let snap = semantic_snapshot(&f, &target, &tab).await;
+
+    assert_eq!(snap["status"], "ok", "{snap}");
+    assert_eq!(snap["oopif"]["frames"], 1, "{snap}");
+    assert_eq!(snap["snapshot"]["omitted"]["not_rendered"], 0, "{snap}");
+    assert_eq!(snap["snapshot"]["hint"], Value::Null, "{snap}");
+}
+
+#[tokio::test]
+async fn semantic_visible_tab_without_layout_is_not_flagged() {
+    let f = fixture_with(|st| st.oopif_present = false).await;
+    let (target, tab) = bind(&f).await;
+    let snap = semantic_snapshot(&f, &target, &tab).await;
+
+    assert_eq!(snap["status"], "ok", "{snap}");
+    assert_eq!(snap["snapshot"]["complete"], true, "{snap}");
+    assert_eq!(snap["snapshot"]["omitted"]["not_rendered"], 0, "{snap}");
+    assert_eq!(snap["snapshot"]["hint"], Value::Null, "{snap}");
+    let probes = recorded_calls(&f, "Runtime.evaluate");
+    assert_eq!(probes.len(), 1, "{probes:?}");
+    assert_eq!(
+        probes[0].1["expression"],
+        "document.visibilityState === 'visible'"
+    );
+}
+
+#[tokio::test]
 async fn semantic_snapshot_does_not_capture_unless_requested() {
     let f = fixture().await;
     let (target, tab) = bind(&f).await;
@@ -2825,6 +3022,38 @@ async fn foreground_navigation_activates_the_exact_tab_and_returns_readback() {
 }
 
 #[tokio::test]
+async fn foreground_navigation_preserves_fragment_and_fences_fragment_changes() {
+    for changes_after_readback in [false, true] {
+        let f =
+            fixture_with(|state| state.readback_changes_fragment = changes_after_readback).await;
+        let (target, tab) = bind(&f).await;
+        let result = BrowserNavigateTool::new(f.engine.clone())
+            .invoke(json!({
+                "target_id": target,
+                "tab_id": tab,
+                "url": "https://fixture.test/fragment#section",
+                "delivery_mode": "foreground",
+                "session": SESSION,
+            }))
+            .await;
+        let receipt = result
+            .structured_content
+            .as_ref()
+            .expect("navigation receipt");
+        if changes_after_readback {
+            assert_eq!(result.is_error, Some(true), "{receipt}");
+            assert_eq!(receipt["readback_state"], "stale_document", "{receipt}");
+        } else {
+            assert_eq!(result.is_error, None, "{receipt}");
+            assert_eq!(
+                receipt["current_url"],
+                "https://fixture.test/fragment#section"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn foreground_navigation_accepts_a_committed_redirect_on_the_same_loader() {
     let f = fixture_with(|state| {
         state.navigation_redirect_url = Some("https://fixture.test/redirected-final".into());
@@ -3110,10 +3339,8 @@ async fn browser_visual_feedback_probes_live_tab_visibility_without_activating_i
         .await;
 
     assert_eq!(
-        structured(&result)["status"],
-        "ok",
-        "{}",
-        structured(&result)
+        result.action_record.as_ref().map(|record| record.effect),
+        Some(crate::action_record::ActionEffect::Confirmed)
     );
     let visibility = recorded_calls(&f, "Runtime.evaluate");
     assert_eq!(visibility.len(), 1, "{visibility:?}");
@@ -3784,34 +4011,25 @@ async fn trusted_click_refuses_when_standalone_background_posture_is_unavailable
         "input_route": "dom_event", "session": SESSION
     });
     let synthetic = BrowserClickTool::new(f.engine.clone())
-        .invoke(synthetic_args.clone())
+        .invoke(synthetic_args)
         .await;
-    assert_eq!(structured(&synthetic)["status"], "ok");
-    assert_eq!(structured(&synthetic)["effect"], "unverifiable");
-    assert_eq!(structured(&synthetic)["escalation"]["recommended"], "page");
     assert!(synthetic.content.iter().any(|content| matches!(
         content,
         crate::protocol::Content::Text { text, .. }
-            if text.contains("application effect not verified")
-                && text.contains("trust-gated controls")
+            if text.contains("confirmed a target-state change")
     )));
-    let public = ActionExecutionRecord::from_legacy(
-        "browser_click",
-        &synthetic_args,
-        structured(&synthetic),
-    )
-    .expect("browser click action record")
-    .public_result()
-    .expect("public browser click result");
+    let public = synthetic
+        .action_record
+        .as_ref()
+        .expect("typed browser click action record")
+        .public_result()
+        .expect("public browser click result");
     let public = serde_json::to_value(public).expect("serialize public result");
-    assert_eq!(public["effect"], "unverifiable", "{public}");
+    assert_eq!(public["effect"], "confirmed", "{public}");
     assert_eq!(public["route"], "dom", "{public}");
     assert_eq!(public["delivery"]["mode"], "background", "{public}");
-    assert_eq!(public["escalation"]["target"], "page", "{public}");
-    assert_eq!(
-        public["escalation"]["reason"], "effect_unconfirmed",
-        "{public}"
-    );
+    assert_eq!(public["evidence"][0]["kind"], "value_readback", "{public}");
+    assert!(public["escalation"].is_null(), "{public}");
     assert!(public.get("status").is_none(), "{public}");
     let dispatches = recorded_calls(&f, "Runtime.callFunctionOn");
     let click_sequence = dispatches
@@ -3847,6 +4065,148 @@ async fn trusted_click_refuses_when_standalone_background_posture_is_unavailable
     assert!(recorded_calls(&f, "Input.dispatchMouseEvent").is_empty());
     assert!(recorded_calls(&f, "Page.bringToFront").is_empty());
     assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
+}
+
+#[tokio::test]
+async fn dom_event_click_remains_unverifiable_when_only_focus_changes() {
+    let f = fixture_with(|state| state.dom_click_changes_readback = false).await;
+    assert!(!f.state.lock().unwrap().dom_click_focused);
+    let (target, tab) = bind(&f).await;
+    let snap = snapshot(&f, &target, &tab).await;
+    let main_ref = ref_of(&snap, "main", "main-btn");
+
+    let result = BrowserClickTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "ref": main_ref,
+            "input_route": "dom_event",
+            "session": SESSION,
+        }))
+        .await;
+
+    assert!(result.content.iter().any(|content| matches!(
+        content,
+        Content::Text { text, .. }
+            if text.contains("target state remained unchanged; application effect is unverifiable")
+    )));
+    let public = result
+        .action_record
+        .as_ref()
+        .expect("typed browser click action record")
+        .public_result()
+        .expect("public browser click result");
+    let public = serde_json::to_value(public).expect("serialize public result");
+    assert!(f.state.lock().unwrap().dom_click_focused);
+    assert_eq!(public["effect"], "unverifiable", "{public}");
+    assert_eq!(public["evidence"][0]["kind"], "value_readback", "{public}");
+    assert_eq!(public["escalation"]["target"], "page", "{public}");
+    assert_eq!(
+        public["escalation"]["reason"], "effect_unconfirmed",
+        "{public}"
+    );
+}
+
+#[tokio::test]
+async fn dom_event_click_remains_unverifiable_when_semantic_readback_is_unavailable() {
+    let f = fixture_with(|state| state.dom_click_readback_available = false).await;
+    let (target, tab) = bind(&f).await;
+    let snap = snapshot(&f, &target, &tab).await;
+    let main_ref = ref_of(&snap, "main", "main-btn");
+
+    let result = BrowserClickTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "ref": main_ref,
+            "input_route": "dom_event",
+            "session": SESSION,
+        }))
+        .await;
+
+    assert!(result.content.iter().any(|content| matches!(
+        content,
+        Content::Text { text, .. }
+            if text.contains("semantic target readback was unavailable")
+    )));
+    let public = result
+        .action_record
+        .as_ref()
+        .expect("typed browser click action record")
+        .public_result()
+        .expect("public browser click result");
+    let public = serde_json::to_value(public).expect("serialize public result");
+    assert_eq!(public["effect"], "unverifiable", "{public}");
+    assert!(public["evidence"].is_null(), "{public}");
+    assert_eq!(
+        public["escalation"]["reason"], "effect_unconfirmed",
+        "{public}"
+    );
+}
+
+#[tokio::test]
+async fn dom_event_click_bounds_stalled_readbacks() {
+    for reads in [0, 1, 2] {
+        let f = fixture_with(|state| {
+            state.dom_click_stall_after = Some(reads);
+            state.dom_click_changes_readback = false;
+        })
+        .await;
+        let (target, tab) = bind(&f).await;
+        let snap = snapshot(&f, &target, &tab).await;
+        let main_ref = ref_of(&snap, "main", "main-btn");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            BrowserClickTool::new(f.engine.clone()).invoke(json!({
+                "target_id": target,
+                "tab_id": tab,
+                "ref": main_ref,
+                "input_route": "dom_event",
+                "session": SESSION,
+            })),
+        )
+        .await
+        .expect("click must not wait for CALL_TIMEOUT");
+        assert!(result.content.iter().any(|content| matches!(
+            content,
+            Content::Text { text, .. }
+                if text.contains("semantic target readback was unavailable")
+        )));
+        let public = result.action_record.unwrap().public_result().unwrap();
+        let public = serde_json::to_value(public).unwrap();
+        assert_eq!(public["effect"], "unverifiable");
+        assert!(public["evidence"].is_null());
+        assert_eq!(public["escalation"]["reason"], "effect_unconfirmed");
+    }
+}
+
+#[tokio::test]
+async fn dom_event_click_is_unverifiable_when_readback_disappears() {
+    let f = fixture_with(|state| {
+        state.dom_click_changes_readback = false;
+        state.dom_click_reads_before_failure = Some(2);
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let snap = snapshot(&f, &target, &tab).await;
+    let main_ref = ref_of(&snap, "main", "main-btn");
+    let result = BrowserClickTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "ref": main_ref,
+            "input_route": "dom_event",
+            "session": SESSION,
+        }))
+        .await;
+    let public = result.action_record.unwrap().public_result().unwrap();
+    let public = serde_json::to_value(public).unwrap();
+    assert_eq!(public["effect"], "unverifiable", "{public}");
+    assert!(public["evidence"].is_null(), "{public}");
+    assert_eq!(
+        f.state.lock().unwrap().dom_click_reads_before_failure,
+        Some(0)
+    );
 }
 
 #[tokio::test]
@@ -4095,6 +4455,135 @@ async fn keystrokes_use_char_events_for_text_delivery() {
     }));
     assert!(recorded_calls(&f, "Page.bringToFront").is_empty());
     assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
+}
+
+async fn select_with(f: &Fixture, frame: &str, element: &str, matcher: Value) -> Value {
+    let (target, tab) = bind(f).await;
+    let snap = snapshot(f, &target, &tab).await;
+    let mut args = json!({
+        "target_id": target,
+        "tab_id": tab,
+        "ref": ref_of(&snap, frame, element),
+        "session": SESSION
+    });
+    args.as_object_mut()
+        .unwrap()
+        .extend(matcher.as_object().unwrap().clone());
+    let result = BrowserSelectTool::new(f.engine.clone()).invoke(args).await;
+    result
+        .structured_content
+        .clone()
+        .unwrap_or_else(|| json!({ "error": result.is_error }))
+}
+
+fn select_scripts(f: &Fixture) -> Vec<(Option<String>, Value)> {
+    recorded_calls(f, "Runtime.callFunctionOn")
+        .into_iter()
+        .filter(|(_, params)| {
+            params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("HTMLSelectElement"))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn select_passes_the_matcher_as_cdp_arguments_and_reports_the_readback() {
+    for (field, wanted) in [("label", "Q3 report"), ("value", "q3-report")] {
+        let f = fixture_with(|st| {
+            st.select_outcome =
+                json!({ "changed": true, "value": "q3-report", "label": "Q3 report" });
+        })
+        .await;
+        let s = select_with(&f, "main", "Shadow Input", json!({ field: wanted })).await;
+        assert_eq!(s["status"], "ok", "{s}");
+        assert_eq!(s["changed"], true);
+        assert_eq!(s["value"], "q3-report");
+        assert_eq!(s["label"], "Q3 report");
+        assert_eq!(s["frame"], "main");
+
+        let scripts = select_scripts(&f);
+        assert_eq!(scripts.len(), 1);
+        let (session, params) = &scripts[0];
+        assert!(session.as_deref().unwrap().starts_with("tab-sess-"));
+        assert_eq!(params["objectId"], "obj-20");
+        assert_eq!(params["returnByValue"], true);
+        assert_eq!(
+            params["arguments"],
+            json!([{ "value": field }, { "value": wanted }])
+        );
+        assert!(!params["functionDeclaration"]
+            .as_str()
+            .unwrap()
+            .contains(wanted));
+        assert!(recorded_calls(&f, "Runtime.evaluate")
+            .iter()
+            .all(|(_, params)| params["expression"] == "document.visibilityState === 'visible'"));
+    }
+}
+
+#[tokio::test]
+async fn select_requires_exactly_one_of_label_or_value_before_touching_the_page() {
+    for matcher in [json!({}), json!({ "label": "Beta", "value": "b" })] {
+        let f = fixture().await;
+        let s = select_with(&f, "main", "Shadow Input", matcher).await;
+        assert_eq!(s, json!({ "error": true }));
+        assert!(select_scripts(&f).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn select_reports_live_refusals_and_script_failures_as_refused() {
+    for (outcome, message) in [
+        (
+            json!({ "refused": "the ref is not a native HTML select element" }),
+            "the ref is not a native HTML select element",
+        ),
+        (
+            json!({ "refused": "2 options match the requested label; exactly one must" }),
+            "2 options match the requested label; exactly one must",
+        ),
+        (
+            json!({ "refused": "the matching option is disabled" }),
+            "the matching option is disabled",
+        ),
+        (
+            Value::Null,
+            "the select script failed before reporting a selection",
+        ),
+    ] {
+        let f = fixture_with(|st| st.select_outcome = outcome).await;
+        let s = select_with(&f, "main", "Shadow Input", json!({ "label": "Beta" })).await;
+        assert_eq!(s["status"], "refused", "{s}");
+        assert_eq!(s["refusal"]["code"], "browser_action_unavailable");
+        assert_eq!(s["refusal"]["message"], message);
+    }
+}
+
+#[tokio::test]
+async fn select_of_the_current_option_reports_no_change() {
+    let f = fixture_with(|st| {
+        st.select_outcome = json!({ "changed": false, "value": "a", "label": "Alpha" });
+    })
+    .await;
+    let s = select_with(&f, "main", "Shadow Input", json!({ "value": "a" })).await;
+    assert_eq!(s["status"], "ok", "{s}");
+    assert_eq!(s["changed"], false);
+    assert_eq!(s["label"], "Alpha");
+}
+
+#[tokio::test]
+async fn select_in_an_oopif_routes_to_the_child_session() {
+    let f = fixture_with(|st| {
+        st.select_outcome = json!({ "changed": true, "value": "b", "label": "Beta" });
+    })
+    .await;
+    let s = select_with(&f, "oopif", "ad-input", json!({ "label": "Beta" })).await;
+    assert_eq!(s["status"], "ok", "{s}");
+    assert_eq!(s["frame"], "oopif");
+    let scripts = select_scripts(&f);
+    assert_eq!(scripts.len(), 1);
+    assert!(scripts[0].0.as_deref().unwrap().starts_with("oopif-sess-"));
 }
 
 // ---- window-less page targets (trycua/cua#3540) ------------------------------------------

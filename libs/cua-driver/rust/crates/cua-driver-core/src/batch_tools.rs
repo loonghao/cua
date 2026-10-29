@@ -487,15 +487,13 @@ impl Plan {
                 break;
             };
             match tool {
-                OBSERVE_TOOL | "screenshot" => {
+                OBSERVE_TOOL | "screenshot" if trailing_observe.is_none() => {
                     // The latest trailing read wins; earlier ones are dropped.
-                    if trailing_observe.is_none() {
-                        let mut args = args;
-                        if tool == "screenshot" {
-                            args = json!({ "include_screenshot": true });
-                        }
-                        trailing_observe = Some(args);
+                    let mut args = args;
+                    if tool == "screenshot" {
+                        args = json!({ "include_screenshot": true });
                     }
+                    trailing_observe = Some(args);
                 }
                 "zoom" => tail_reads.insert(0, ("zoom", args)),
                 // Other reads at the end (list_windows, verify_state, ...)
@@ -675,14 +673,26 @@ impl Plan {
                     json!({}),
                 )
             } else {
-                run_step(
-                    registry,
-                    &locator,
-                    index,
-                    step,
-                    &mut context,
-                    &mut last_window,
-                    self.foreground_fallback,
+                // Every step but the last is followed by another, so it does
+                // not hold up the batch for the cursor glide or the full
+                // window-change report. The last step keeps them: it reports
+                // what the batch left open.
+                let pacing = if index + 1 < total {
+                    crate::step_pacing::StepPacing::Batched
+                } else {
+                    crate::step_pacing::StepPacing::Single
+                };
+                crate::step_pacing::scope(
+                    pacing,
+                    run_step(
+                        registry,
+                        &locator,
+                        index,
+                        step,
+                        &mut context,
+                        &mut last_window,
+                        self.foreground_fallback,
+                    ),
                 )
                 .await
             };
@@ -1018,6 +1028,17 @@ async fn run_step(
                 .and_then(Value::as_str)
             {
                 report["code"] = Value::String(code.to_owned());
+            }
+            // The step's own recovery hint and next call, so a failed batch
+            // says what to do next without a second tool call.
+            for key in ["hint", "next_call"] {
+                if let Some(value) = result
+                    .structured_content
+                    .as_ref()
+                    .and_then(|value| value.get(key))
+                {
+                    report[key] = value.clone();
+                }
             }
             return StepOutcome {
                 line: format!("{}. {label} ERROR (action): {message}", index + 1),
