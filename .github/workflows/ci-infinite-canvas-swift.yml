@@ -14,18 +14,15 @@ name: "CI: infinite-canvas (Swift)"
 # the cursor theme (the map and the reasons are in
 # .github/scripts/ci_swift_samples_scope.py). There is no event-level `paths:`
 # filter: the cheap ubuntu `scope` job always runs and decides, so the `ci:full`
-# label, every push to main and the nightly schedule reach it. Rust-internal
+# label and every push to main reach it. Rust-internal
 # changes that leave the binding alone are covered by the full run on every
-# push to main and by the nightly schedule. Release-please branches skip the
+# push to main. Release-please branches skip the
 # macOS job as they always have.
 
 on:
   pull_request:
   push:
     branches: [main]
-  # Drift check: the full build on main, whatever changed.
-  schedule:
-    - cron: "37 5 * * *"
   workflow_dispatch:
 
 permissions:
