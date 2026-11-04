@@ -270,13 +270,16 @@ class WorkflowWiringTests(unittest.TestCase):
             self.assertIn("./.github/actions/setup-protoc", uses)
             self.assertIn("./.github/actions/rust-cache", uses)
 
-    def test_full_run_on_main_and_nightly(self):
+    def test_full_run_on_main_and_manual_dispatch(self):
         for lane in LANES:
             on = self.load(lane)[True]
             self.assertEqual(on["push"], {"branches": ["main"]})
-            self.assertEqual(len(on["schedule"]), 1)
-            self.assertRegex(on["schedule"][0]["cron"], r"^\d+ \d+ \* \* \*$")
             self.assertIn("workflow_dispatch", on)
+
+    def test_sdk_and_swift_workflows_keep_only_pr_push_and_manual_triggers(self):
+        for workflow in (*LANE_WORKFLOWS.values(), "ci-cua-sdk.yml"):
+            on = yaml.safe_load((WORKFLOWS / workflow).read_text())[True]
+            self.assertEqual(set(on), {"pull_request", "push", "workflow_dispatch"}, workflow)
 
     @staticmethod
     def evaluate(condition, **context):
