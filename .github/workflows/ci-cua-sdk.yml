@@ -29,8 +29,6 @@ on:
       - ".github/workflows/ci-cua-sdk.yml"
       - ".github/actions/linux-rust-prep/**"
       - ".github/scripts/ci_reuse_pr_result.py"
-  schedule:
-    - cron: "41 18 * * *"
   workflow_dispatch:
 
 permissions:
