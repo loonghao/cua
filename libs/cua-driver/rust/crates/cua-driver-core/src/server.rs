@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Shared MCP request dispatch and privacy-bounded observations.
 
 use std::sync::{Arc, OnceLock};
@@ -613,31 +616,6 @@ pub fn tool_observation_timer(
         valid_params,
         path,
     ))
-}
-
-/// Build a private aggregate-session context from a valid, known tool call.
-/// Only the public `session` argument is considered; reserved fallback keys
-/// and all other arguments remain outside the observer seam.
-pub fn session_tool_context(
-    req: &Request,
-    is_known_tool: impl Fn(&str) -> bool,
-    transport: crate::session::SessionTransport,
-) -> Option<crate::session::SessionToolContext> {
-    if req.method != "tools/call" {
-        return None;
-    }
-    let call = req.tool_call().ok()?;
-    let known_tool = call.name == "type_text_chars"
-        || crate::tool::renamed_tool(&call.name).is_some()
-        || is_known_tool(&call.name);
-    let client_kind = match transport {
-        crate::session::SessionTransport::Cli => crate::session::SessionClientKind::Cli,
-        crate::session::SessionTransport::Daemon => crate::session::SessionClientKind::Direct,
-        crate::session::SessionTransport::McpStdio | crate::session::SessionTransport::McpHttp => {
-            crate::session::SessionClientKind::Mcp
-        }
-    };
-    crate::session::begin_tool_call(&call.name, &call.args, known_tool, transport, client_kind)
 }
 
 fn notify_session_started(metadata: InitializeMetadata) {
