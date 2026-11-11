@@ -150,9 +150,6 @@ impl MockCdpServer {
                             let _ = ws.close(None).await;
                             return;
                         }
-                        if reply.suppress_response {
-                            continue;
-                        }
                         for event in reply.events {
                             let mut frame =
                                 json!({ "method": event.method, "params": event.params });

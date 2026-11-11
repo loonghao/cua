@@ -45,6 +45,10 @@ use crate::uia::UiaNode;
 // same rule: its native URL and web-control topology are contracts; its
 // localized document, heading, and checkbox names are not.
 
+fn refusal(code: BrowserRefusalCode, message: impl Into<String>) -> BrowserRefusal {
+    BrowserRefusal::new(code, message)
+}
+
 fn release_nodes(nodes: &[UiaNode]) {
     for node in nodes.iter().filter(|node| node.element_ptr != 0) {
         unsafe { drop(IUIAutomationElement::from_raw(node.element_ptr as *mut _)) };
