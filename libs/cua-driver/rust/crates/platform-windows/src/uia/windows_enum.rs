@@ -282,9 +282,12 @@ fn enumerate_top_level_windows_unbounded() -> Vec<WindowInfo> {
     }
 }
 
-/// Exercise the real desktop enumeration call shape for `cua-driver doctor`
-/// without allowing health checks to bypass the process-wide single-flight
-/// bound used by window and interaction tools.
+/// Exercise the UIA root acquisition path for `cua-driver doctor`.
+///
+/// A full `FindAll(TreeScope_Children)` can be held up by one unrelated
+/// provider even when exact-window UIA works. The health report answers a
+/// narrower question: whether COM and the desktop root are reachable. It must
+/// not turn a slow full enumeration into a global `AX unavailable` verdict.
 pub(crate) fn probe_desktop_availability() -> Result<(), String> {
     match run_uia_with_deadline(
         "health probe",
@@ -316,12 +319,12 @@ fn probe_desktop_availability_unbounded() -> Result<(), String> {
         let root = automation
             .GetRootElement()
             .map_err(|e| format!("GetRootElement: {e}"))?;
-        let condition = automation
-            .CreateTrueCondition()
-            .map_err(|e| format!("CreateTrueCondition: {e}"))?;
-        let _children = root
-            .FindAll(TreeScope_Children, &condition)
-            .map_err(|e| format!("FindAll(TreeScope_Children): {e}"))?;
+        // The root's existence proves UIA is reachable on this desktop. Reading
+        // its control type uses the same COM provider call shape as an exact
+        // window observation without enumerating every third-party provider.
+        let _ = root
+            .CurrentControlType()
+            .map_err(|e| format!("CurrentControlType: {e}"))?;
     }
     Ok(())
 }
@@ -1189,6 +1192,22 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
     use windows::Win32::Foundation::RECT;
+
+    #[test]
+    fn health_probe_uses_root_availability_without_full_desktop_enumeration() {
+        let source = include_str!("windows_enum.rs");
+        let start = source
+            .find("fn probe_desktop_availability_unbounded()")
+            .expect("health probe helper");
+        let end = source[start..]
+            .find("\n/// Hit-test screen point")
+            .expect("health probe helper end")
+            + start;
+        let helper = &source[start..end];
+        assert!(helper.contains("GetRootElement"));
+        assert!(helper.contains("CurrentControlType"));
+        assert!(!helper.contains("FindAll(TreeScope_Children"));
+    }
 
     #[test]
     fn point_invoke_preserves_worker_outcomes() {
