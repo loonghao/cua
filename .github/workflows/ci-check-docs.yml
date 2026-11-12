@@ -252,7 +252,7 @@ jobs:
 
   check-docs-sync:
     name: Check Documentation Sync
-    if: ${{ always() && needs.quick.outputs.skip != 'true' }}
+    if: ${{ always() && needs.quick.result == 'success' && needs.scope.result == 'success' && needs.quick.outputs.skip != 'true' }}
     needs: [quick, scope, native-reference]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -263,7 +263,6 @@ jobs:
           SELECTED: ${{ needs.scope.outputs.selected }}
           RESULT: ${{ needs.native-reference.result }}
         run: |
-          test "$SCOPE" = success
           if [ "$SELECTED" = true ]; then
             test "$RESULT" = success
           else
