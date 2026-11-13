@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! UI Automation (UIA) tree walking for Windows.
 //!
 //! Produces the same Markdown format as the macOS AX tree:
@@ -10,7 +13,8 @@
 //!  take >4s when reading each property individually).
 
 use cua_driver_core::walk_budget::WalkBudget;
-use windows::core::{Interface, BSTR};
+use windows::core::{Interface, BSTR, HRESULT};
+use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
@@ -262,8 +266,8 @@ pub fn invoke_menu_path(hwnd: u64, path: &[String]) -> Result<(), String> {
 }
 
 /// Walk the UIA tree with caller-supplied caps. `max_elements`/`max_depth`
-/// truncate the walk and the rendered markdown identically. Issue #22865:
-/// caps protect against Electron / large web apps that produce 10k+
+/// truncate the walk and the rendered markdown identically. These caps
+/// protect against Electron / large web apps that produce 10k+
 /// element trees and blow context windows.
 pub fn walk_tree_bounded(
     hwnd: u64,
@@ -288,13 +292,38 @@ pub fn walk_tree_budgeted(
     unsafe { walk_tree_unsafe(hwnd, query, max_depth, budget) }
 }
 
+/// Join this thread to the MTA unless COM is already up on it. The init is
+/// never paired with `CoUninitialize`: retained element pointers in the walk
+/// result outlive the call. `RPC_E_CHANGED_MODE` means the thread is already
+/// an STA, where UIA works and the init took no reference to release.
+unsafe fn ensure_com() -> Result<(), String> {
+    com_init_result(CoInitializeEx(None, COINIT_MULTITHREADED))
+}
+
+fn com_init_result(hr: HRESULT) -> Result<(), String> {
+    if hr.is_ok() || hr == RPC_E_CHANGED_MODE {
+        Ok(())
+    } else {
+        Err(format!(
+            "COM init failed: {}",
+            windows::core::Error::from(hr)
+        ))
+    }
+}
+
 unsafe fn walk_tree_unsafe(
     hwnd: u64,
     query: Option<&str>,
     max_depth: usize,
     budget: &mut WalkBudget,
 ) -> UiaTreeResult {
-    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    if let Err(e) = ensure_com() {
+        return UiaTreeResult {
+            tree_markdown: e,
+            nodes: Vec::new(),
+            elements_complete: false,
+        };
+    }
 
     let automation: IUIAutomation =
         match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
@@ -617,9 +646,12 @@ unsafe fn walk_cached_bounded(
 
     let (control_type, emitted_parent) = emit_cached_node(
         element,
-        depth,
-        parent_index,
-        in_web_content,
+        NodeProjectionContext {
+            depth,
+            parent_index,
+            in_web_content,
+        },
+        None,
         nodes,
         lines,
         counter,
@@ -722,8 +754,18 @@ unsafe fn node_cache_request(
 /// Returns `Err` when any native level cannot be read. A partial native tree
 /// would misstate tab topology, so callers must treat it as unavailable.
 pub fn walk_native_tree(hwnd: u64) -> Result<Vec<UiaNode>, String> {
+    walk_native_tree_impl(hwnd, false)
+}
+
+/// Strict native-only enumeration for ownership subtraction and post-close
+/// readback. A truncated or unavailable level cannot prove an element absent.
+pub(crate) fn walk_native_tree_complete(hwnd: u64) -> Result<Vec<UiaNode>, String> {
+    walk_native_tree_impl(hwnd, true)
+}
+
+fn walk_native_tree_impl(hwnd: u64, complete: bool) -> Result<Vec<UiaNode>, String> {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        ensure_com()?;
         let automation: IUIAutomation =
             CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| format!("UIA init failed: {e}"))?;
@@ -750,6 +792,7 @@ pub fn walk_native_tree(hwnd: u64) -> Result<Vec<UiaNode>, String> {
             &mut lines,
             &mut counter,
             &mut budget,
+            complete,
         );
         match walked {
             Ok(()) => Ok(nodes),
@@ -759,6 +802,25 @@ pub fn walk_native_tree(hwnd: u64) -> Result<Vec<UiaNode>, String> {
             }
         }
     }
+}
+
+fn complete_native_children_present(
+    status: windows::core::HRESULT,
+    pointer_is_null: bool,
+) -> Result<bool, String> {
+    status
+        .ok()
+        .map_err(|error| format!("native UIA children were unavailable: {error}"))?;
+    Ok(!pointer_is_null)
+}
+
+fn complete_native_child_count(count: windows::core::Result<i32>) -> Result<i32, String> {
+    let count = count
+        .map_err(|error| format!("the complete native UIA child count was unavailable: {error}"))?;
+    if count < 0 {
+        return Err("the complete native UIA child count was invalid".to_owned());
+    }
+    Ok(count)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -771,22 +833,68 @@ unsafe fn walk_native_level(
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
     budget: &mut WalkBudget,
+    complete: bool,
 ) -> Result<(), String> {
     if depth > DEFAULT_MAX_DEPTH {
+        if complete {
+            return Err("the native UIA tree exceeded the complete-read depth budget".to_owned());
+        }
         return Ok(());
     }
     if !budget.admit() {
         return Err("the native UIA tree exceeded the element budget".to_owned());
     }
-    let (control_type, emitted_parent) =
-        emit_cached_node(element, depth, parent_index, false, nodes, lines, counter);
+    let complete_type = if complete {
+        let kind = element
+            .CachedControlType()
+            .map_err(|error| format!("a native UIA control type was unavailable: {error}"))?;
+        if kind.0 == 0 {
+            return Err("a complete native UIA control type was invalid".to_owned());
+        }
+        Some(control_type_name(kind.0))
+    } else {
+        None
+    };
+    let (control_type, emitted_parent) = emit_cached_node(
+        element,
+        NodeProjectionContext {
+            depth,
+            parent_index,
+            in_web_content: false,
+        },
+        complete_type,
+        nodes,
+        lines,
+        counter,
+    );
     if control_type.eq_ignore_ascii_case("Document") {
         return Ok(());
     }
-    let Ok(children) = element.GetCachedChildren() else {
-        return Ok(());
+    let children = if complete {
+        // GetCachedChildren explicitly permits S_OK/null for a leaf. The
+        // generated non-null interface binding turns that into Err, so inspect
+        // the HRESULT and nullable ABI pointer separately before taking ownership.
+        let mut raw = std::ptr::null_mut();
+        let status = (Interface::vtable(element).GetCachedChildren)(element.as_raw(), &mut raw);
+        if status.is_err() && !raw.is_null() {
+            drop(IUIAutomationElementArray::from_raw(raw));
+        }
+        if !complete_native_children_present(status, raw.is_null())? {
+            return Ok(());
+        }
+        IUIAutomationElementArray::from_raw(raw)
+    } else {
+        let Ok(children) = element.GetCachedChildren() else {
+            return Ok(());
+        };
+        children
     };
-    for i in 0..children.Length().unwrap_or(0) {
+    let length = if complete {
+        complete_native_child_count(children.Length())?
+    } else {
+        children.Length().unwrap_or(0)
+    };
+    for i in 0..length {
         let child = children
             .GetElement(i)
             .and_then(|child| child.BuildUpdatedCache(cache_req))
@@ -800,34 +908,47 @@ unsafe fn walk_native_level(
             lines,
             counter,
             budget,
+            complete,
         )?;
     }
     Ok(())
+}
+
+/// A node's tree position and native/renderer boundary during projection.
+struct NodeProjectionContext {
+    depth: usize,
+    parent_index: Option<usize>,
+    in_web_content: bool,
 }
 
 /// Project one cached element into `nodes`/`lines`. Returns its control type
 /// and the parent index its descendants should inherit.
 fn emit_cached_node(
     element: &IUIAutomationElement,
-    depth: usize,
-    parent_index: Option<usize>,
-    in_web_content: bool,
+    context: NodeProjectionContext,
+    complete_type: Option<String>,
     nodes: &mut Vec<UiaNode>,
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
 ) -> (String, Option<usize>) {
-    let control_type = read_cached_control_type(element);
+    let NodeProjectionContext {
+        depth,
+        parent_index,
+        in_web_content,
+    } = context;
+    let include_inert = complete_type.is_some();
+    let control_type = complete_type.unwrap_or_else(|| read_cached_control_type(element));
     let name = read_cached_bstr_name(element);
     let value = read_cached_bstr_value(element);
     let automation_id = read_cached_bstr(element, UIA_AutomationIdPropertyId);
     let help_text = read_cached_bstr(element, UIA_HelpTextPropertyId);
     let enabled = read_cached_bool(element, UIA_IsEnabledPropertyId);
-    // Missing UIA state must remain unknown on the structured observation
-    // surface. Action discovery keeps its historical best-effort assumption.
-    let is_enabled = enabled.unwrap_or(true);
     let selected = read_cached_selected(element);
-    let actions = detect_cached_actions(element, &control_type, is_enabled);
-    let is_actionable = !actions.is_empty() && is_enabled;
+    // A disabled control is indexed and published with `enabled: false`, as on
+    // macOS: enablement is state the caller needs to read, not a reason to hide
+    // the row. The token writers refuse it (`tools::impl_::refuse_if_disabled`).
+    let actions = detect_cached_actions(element, &control_type);
+    let is_actionable = !actions.is_empty();
     let has_content = name
         .as_deref()
         .map(|s| !s.trim().is_empty())
@@ -838,7 +959,7 @@ fn emit_cached_node(
             .unwrap_or(false);
 
     let mut emitted_parent: Option<usize> = parent_index;
-    if is_actionable || has_content {
+    if retain_native_node(include_inert, is_actionable, has_content) {
         let retained: IUIAutomationElement = element.clone();
         let ptr = retained.as_raw() as usize;
         std::mem::forget(retained);
@@ -893,6 +1014,10 @@ fn emit_cached_node(
         nodes.push(node);
     }
     (control_type, emitted_parent)
+}
+
+fn retain_native_node(complete_native_read: bool, is_actionable: bool, has_content: bool) -> bool {
+    complete_native_read || is_actionable || has_content
 }
 
 fn read_cached_control_type(element: &IUIAutomationElement) -> String {
@@ -959,9 +1084,11 @@ fn read_cached_bool(
 /// Read bounding rect as (center_x, center_y, Some((l,t,r,b))). Returns
 /// rect=None when the element has no meaningful BoundingRectangle (offscreen
 /// containers, structure-only elements).
+type BoundingRect = (i32, i32, i32, i32);
+
 fn read_cached_bounding_rect_full(
     element: &IUIAutomationElement,
-) -> (i32, i32, Option<(i32, i32, i32, i32)>) {
+) -> (i32, i32, Option<BoundingRect>) {
     unsafe {
         match element.CachedBoundingRectangle() {
             Ok(r) if r.right > r.left && r.bottom > r.top => (
@@ -974,14 +1101,7 @@ fn read_cached_bounding_rect_full(
     }
 }
 
-fn detect_cached_actions(
-    element: &IUIAutomationElement,
-    control_type: &str,
-    is_enabled: bool,
-) -> Vec<String> {
-    if !is_enabled {
-        return vec![];
-    }
+fn detect_cached_actions(element: &IUIAutomationElement, control_type: &str) -> Vec<String> {
     let mut actions = Vec::new();
     unsafe {
         if element.GetCachedPattern(UIA_InvokePatternId).is_ok() {
@@ -1114,6 +1234,9 @@ pub(crate) fn format_node_line(node: &UiaNode) -> String {
         if let Some(h) = &node.help_text {
             attrs.push(format!("help=\"{}\"", h));
         }
+        if node.enabled == Some(false) {
+            attrs.push("enabled=false".to_owned());
+        }
         if !node.actions.is_empty() {
             attrs.push(format!("actions=[{}]", node.actions.join(",")));
         }
@@ -1157,8 +1280,12 @@ fn filter_tree(markdown: &str, query: &str) -> String {
             ancestors.push("");
             last_emitted.push(None);
         }
-        for d in (depth + 1)..ancestors.len() {
-            last_emitted[d] = None;
+        for slot in last_emitted
+            .iter_mut()
+            .take(ancestors.len())
+            .skip(depth + 1)
+        {
+            *slot = None;
         }
         ancestors[depth] = line;
 
@@ -1187,8 +1314,103 @@ fn filter_tree(markdown: &str, query: &str) -> String {
 }
 
 #[cfg(test)]
+mod complete_native_read_tests {
+    use super::*;
+    use windows::core::{Error, HRESULT};
+
+    #[test]
+    fn complete_native_projection_keeps_unnamed_inert_nodes() {
+        assert!(retain_native_node(true, false, false));
+        assert!(!retain_native_node(false, false, false));
+        assert!(retain_native_node(false, true, false));
+    }
+
+    #[test]
+    fn successful_null_children_is_a_proven_leaf() {
+        assert!(!complete_native_children_present(HRESULT(0), true).unwrap());
+        assert!(complete_native_children_present(HRESULT(0), false).unwrap());
+    }
+
+    #[test]
+    fn failed_children_read_cannot_be_treated_as_a_leaf() {
+        let failed = HRESULT(0x80004005u32 as i32);
+        assert!(complete_native_children_present(failed, true).is_err());
+        assert!(complete_native_children_present(failed, false).is_err());
+        assert!(complete_native_child_count(Err(Error::from_hresult(failed))).is_err());
+        assert!(complete_native_child_count(Ok(-1)).is_err());
+        assert_eq!(complete_native_child_count(Ok(0)).unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_disabled_control_row_says_so() {
+        let node = UiaNode {
+            element_index: Some(7),
+            control_type: "CheckBox".into(),
+            name: Some("Reset".into()),
+            value: None,
+            automation_id: Some("chk-reset".into()),
+            help_text: None,
+            actions: vec!["toggle".into()],
+            enabled: Some(false),
+            selected: Some(false),
+            element_ptr: 0,
+            center_x: 0,
+            center_y: 0,
+            rect: None,
+            msaa_role: None,
+            depth: 0,
+            parent_element_index: None,
+            in_web_content: false,
+        };
+        assert_eq!(
+            format_node_line(&node),
+            "- [7] CheckBox \"Reset\" [id=chk-reset enabled=false actions=[toggle]]"
+        );
+        let enabled = UiaNode {
+            enabled: Some(true),
+            ..node
+        };
+        assert_eq!(
+            format_node_line(&enabled),
+            "- [7] CheckBox \"Reset\" [id=chk-reset actions=[toggle]]"
+        );
+    }
+
+    #[test]
+    fn com_init_accepts_an_existing_apartment_of_either_mode() {
+        use windows::Win32::Foundation::{E_OUTOFMEMORY, S_FALSE, S_OK};
+        assert!(com_init_result(S_OK).is_ok());
+        assert!(com_init_result(S_FALSE).is_ok());
+        assert!(com_init_result(RPC_E_CHANGED_MODE).is_ok());
+        assert!(com_init_result(E_OUTOFMEMORY)
+            .unwrap_err()
+            .starts_with("COM init failed"));
+    }
+
+    #[test]
+    fn uia_is_usable_on_a_thread_already_in_an_sta() {
+        use windows::Win32::System::Com::{CoUninitialize, COINIT_APARTMENTTHREADED};
+        std::thread::spawn(|| unsafe {
+            assert!(CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok());
+            assert_eq!(
+                CoInitializeEx(None, COINIT_MULTITHREADED),
+                RPC_E_CHANGED_MODE
+            );
+            assert_eq!(ensure_com(), Ok(()));
+            let automation: windows::core::Result<IUIAutomation> =
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+            assert!(automation.is_ok());
+            drop(automation);
+            CoUninitialize();
+        })
+        .join()
+        .unwrap();
+    }
 
     fn star(child_count: usize) -> Vec<Vec<usize>> {
         let mut children = vec![Vec::new(); child_count + 1];
@@ -1198,8 +1420,8 @@ mod tests {
 
     fn chain(len: usize) -> Vec<Vec<usize>> {
         let mut children = vec![Vec::new(); len];
-        for i in 0..len.saturating_sub(1) {
-            children[i] = vec![i + 1];
+        for (i, slot) in children.iter_mut().enumerate().take(len.saturating_sub(1)) {
+            *slot = vec![i + 1];
         }
         children
     }

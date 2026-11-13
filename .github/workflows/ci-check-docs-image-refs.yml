@@ -7,20 +7,11 @@ name: "CI: Check Docs Image Refs"
 # scripts/images/docs-image-refs-baseline.json, which may only shrink. Also
 # runs nightly: a nightly image regression flips a ledger entry and turns this
 # red until the image is fixed or the guide changes.
+#
+# Pull requests are checked by `CI: Quick` (`bin/ci --quick`, check `docs-image-refs`), so this
+# workflow now runs only on its nightly schedule and on demand (CUA-3558).
 
 on:
-  pull_request:
-    paths:
-      - "docs/**"
-      - "skills/**"
-      - "README.md"
-      - "libs/**/README.md"
-      - "libs/cua/crates/cua-image/src/canonical.rs"
-      - "libs/cua/crates/cua-image/src/resolve.rs"
-      - "scripts/images/check-docs-image-refs.py"
-      - "scripts/images/doctor_ledger.py"
-      - "scripts/images/docs-image-refs-baseline.json"
-      - ".github/workflows/ci-check-docs-image-refs.yml"
   schedule:
     - cron: "11 7 * * *"
   workflow_dispatch:
@@ -46,17 +37,33 @@ jobs:
         run: |
           go install github.com/google/go-containerregistry/cmd/crane@v0.20.6
           echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
-      # fetch-depth: 0 already fetched every branch. Fetching again needs
-      # credentials on a private repository, which this checkout drops.
+      # Prefer this repository's ledger. If the compatibility fork's ledger is
+      # confirmed absent, consult the official live ledger and record its commit.
       - name: Fetch the ledger
         run: |
           if git rev-parse -q --verify refs/remotes/origin/image-doctor-ledger >/dev/null; then
             git worktree add -q "$RUNNER_TEMP/ledger" refs/remotes/origin/image-doctor-ledger
-          elif git fetch -q origin image-doctor-ledger 2>/dev/null; then
-            git worktree add -q "$RUNNER_TEMP/ledger" FETCH_HEAD
           else
-            mkdir -p "$RUNNER_TEMP/ledger"
-            echo "::notice::no image-doctor-ledger branch yet; every ref must be in the baseline"
+            set +e
+            git ls-remote --exit-code origin refs/heads/image-doctor-ledger >"$RUNNER_TEMP/ledger-ref"
+            ledger_status=$?
+            set -e
+            if [ "$ledger_status" -eq 0 ]; then
+              git fetch -q origin refs/heads/image-doctor-ledger
+              git worktree add -q "$RUNNER_TEMP/ledger" FETCH_HEAD
+            elif [ "$ledger_status" -eq 2 ]; then
+              if [ "$GITHUB_REPOSITORY" = "loonghao/cua" ]; then
+                git fetch -q https://github.com/trycua/cua.git refs/heads/image-doctor-ledger
+                echo "Using trycua/cua image-doctor-ledger commit $(git rev-parse FETCH_HEAD)"
+                git worktree add -q "$RUNNER_TEMP/ledger" FETCH_HEAD
+              else
+                mkdir -p "$RUNNER_TEMP/ledger"
+                echo "::notice::no image-doctor-ledger branch yet; every ref must be in the baseline"
+              fi
+            else
+              echo "::error::Could not determine whether the origin ledger exists"
+              exit "$ledger_status"
+            fi
           fi
       - name: Unit tests
         run: python3 -m unittest discover -s scripts/images/tests

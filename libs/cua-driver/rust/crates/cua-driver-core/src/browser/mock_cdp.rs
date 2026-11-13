@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Deterministic in-process mock CDP endpoint for tests.
 //!
 //! A tiny scripted WebSocket server on a loopback port: each incoming
@@ -33,7 +36,11 @@ pub(crate) struct MockEvent {
 /// The scripted reaction to one command.
 pub(crate) struct MockReply {
     pub events: Vec<MockEvent>,
+    /// Close after the handler ran, before acknowledging the command.
+    close_without_reply: bool,
     pub suppress_response: bool,
+    /// Hold the reply this long before sending it (a slow but live page).
+    pub delay: Option<std::time::Duration>,
     pub result: Result<Value, (i64, String)>,
 }
 
@@ -41,16 +48,38 @@ impl MockReply {
     pub fn ok(result: Value) -> Self {
         Self {
             events: Vec::new(),
+            close_without_reply: false,
             result: Ok(result),
             suppress_response: false,
+            delay: None,
+        }
+    }
+
+    /// A command whose reply never comes; any attached events still go out.
+    pub fn hang() -> Self {
+        Self {
+            events: Vec::new(),
+            close_without_reply: false,
+            result: Ok(json!({})),
+            suppress_response: true,
+            delay: None,
         }
     }
 
     pub fn err(code: i64, message: &str) -> Self {
         Self {
             events: Vec::new(),
+            close_without_reply: false,
             result: Err((code, message.to_owned())),
             suppress_response: false,
+            delay: None,
+        }
+    }
+
+    pub fn close_without_reply() -> Self {
+        Self {
+            close_without_reply: true,
+            ..Self::ok(json!({}))
         }
     }
 
@@ -117,8 +146,9 @@ impl MockCdpServer {
                                 .map(str::to_owned),
                         };
                         let reply = handler(&call);
-                        if reply.suppress_response {
-                            continue;
+                        if reply.close_without_reply {
+                            let _ = ws.close(None).await;
+                            return;
                         }
                         for event in reply.events {
                             let mut frame =
@@ -129,6 +159,12 @@ impl MockCdpServer {
                             if ws.send(Message::Text(frame.to_string())).await.is_err() {
                                 return;
                             }
+                        }
+                        if reply.suppress_response {
+                            continue;
+                        }
+                        if let Some(delay) = reply.delay {
+                            tokio::time::sleep(delay).await;
                         }
                         let mut response = match reply.result {
                             Ok(result) => json!({ "id": id, "result": result }),

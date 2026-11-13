@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Background-safe "scroll an off-screen element into view" for coordinate actions.
 //!
 //! The element cache records each actionable element's screen center at walk
@@ -51,6 +54,11 @@ use windows::Win32::UI::Accessibility::{
 ///
 /// `None` means the property could not be read. Callers fail open in that case
 /// so a transient UIA query never blocks an otherwise valid coordinate action.
+///
+/// # Safety
+///
+/// `element_ptr` must be zero or a live `IUIAutomationElement` pointer that the
+/// caller retains for the duration of the call.
 pub unsafe fn element_is_offscreen(element_ptr: usize) -> Option<bool> {
     if element_ptr == 0 {
         return None;
@@ -126,6 +134,11 @@ pub unsafe fn scroll_into_view_and_recenter(
 /// top-level host HWND ignores `WM_VSCROLL`. Keeping this on the UIA channel
 /// makes indexed background scrolls reach that container without activating
 /// the host window.
+///
+/// # Safety
+///
+/// `element_ptr` must be a live `IUIAutomationElement` pointer that the caller
+/// retains for the duration of the call.
 pub unsafe fn scroll_element(
     element_ptr: usize,
     direction: &str,
@@ -135,7 +148,7 @@ pub unsafe fn scroll_element(
         anyhow::bail!("cached UIA scroll element is null");
     }
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    let elem: IUIAutomationElement = IUIAutomationElement::from_raw(element_ptr as *mut _);
+    let elem = std::mem::ManuallyDrop::new(IUIAutomationElement::from_raw(element_ptr as *mut _));
     let pattern = elem
         .GetCurrentPattern(UIA_ScrollPatternId)
         .map_err(|e| anyhow::anyhow!("UIA ScrollPattern unavailable: {e}"))?;
@@ -158,7 +171,6 @@ pub unsafe fn scroll_element(
         };
         result.map_err(|e| anyhow::anyhow!("UIA scroll failed: {e}"))?;
     }
-    std::mem::forget(elem);
     Ok(())
 }
 

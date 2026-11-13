@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! ffmpeg-subprocess video backend (Windows + Linux).
 //!
 //! macOS uses native ScreenCaptureKit in `platform_macos::video_sckit`
@@ -18,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::owned_process::{command, OwnedConsoleChildRole};
 use crate::video::{VideoBackend, VideoBackendFactory, VideoMetadata};
 
 pub struct FfmpegVideoBackendFactory;
@@ -60,7 +64,7 @@ impl FfmpegVideoBackend {
             })?;
         }
 
-        let mut cmd = Command::new(&ffmpeg);
+        let mut cmd = command(OwnedConsoleChildRole::RecordingFfmpeg, &ffmpeg);
         cmd.arg("-y").arg("-loglevel").arg("error");
 
         platform_input_args(&mut cmd);
@@ -208,8 +212,10 @@ pub fn find_ffprobe() -> Option<PathBuf> {
     }
 }
 
-pub(crate) fn find_ffmpeg() -> Option<PathBuf> {
-    if Command::new("ffmpeg")
+/// Locate `ffmpeg`, preferring PATH and falling back to the winget install
+/// location on Windows. Shared by every subprocess-encoding video backend.
+pub fn find_ffmpeg() -> Option<PathBuf> {
+    if command(OwnedConsoleChildRole::PathProbe, "ffmpeg")
         .arg("-version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

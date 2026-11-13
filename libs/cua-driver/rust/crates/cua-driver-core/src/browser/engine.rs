@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! BrowserEngine — the semantic core behind the five browser tools.
 //!
 //! Owns the target/ref store, the CDP connection pool, and every
@@ -27,6 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use indexmap::IndexMap;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -44,13 +48,13 @@ use super::platform::{
     BrowserConsentOutcome, BrowserConsentRequest, BrowserPlatform, BrowserVisualAction,
     BrowserVisualActionKind, ExistingProfileSetupRequest,
 };
-use super::prepare::ManagedBrowsers;
+use super::prepare::{IsolatedLaunchBreaker, ManagedBrowsers};
 use super::reconnect::{ReconnectGates, ReconnectKey};
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
 use super::semantic::{
     build_dom_index, build_layout_index, compose_accessibility_tree, parse_viewport,
-    OmissionCounts, SemanticDocument, SemanticNode, DEFAULT_SEMANTIC_NODE_BUDGET,
-    SEMANTIC_COMPUTED_STYLES,
+    OmissionCounts, SemanticDocument, SemanticNode, SemanticNodeIdentity, SemanticScopeAnchor,
+    SemanticScopeFailure, DEFAULT_SEMANTIC_NODE_BUDGET, SEMANTIC_COMPUTED_STYLES,
 };
 use super::store::{
     format_ref, BrowserStore, BrowserVisibility, FrameIdentity, FrameKind, FrameRef, RefEntry,
@@ -72,11 +76,17 @@ pub const MAX_REFS_PER_SNAPSHOT: usize = 300;
 /// compromised or malformed endpoint before its response reaches consumers.
 const MAX_BROWSER_SCREENSHOT_BYTES: usize = 16 * 1024 * 1024;
 
+/// Reply deadline for the `Page.enable` dialog subscription, sent on a tab's
+/// first attach and retried by `browser_dialog`.
+pub(crate) const DIALOG_SUBSCRIPTION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
 pub struct BrowserEngine {
     pub(crate) platform: Arc<dyn BrowserPlatform>,
     pub(crate) store: BrowserStore,
     pub(crate) pool: CdpPool,
     pub(crate) managed_browsers: ManagedBrowsers,
+    pub(crate) isolated_launch_breaker: IsolatedLaunchBreaker,
     pub(crate) existing_profile_grants: ExistingProfileGrants,
     pub(crate) approval_broker: Arc<crate::consent::ApprovalBroker>,
     pub(crate) protected_resource_ownership: Arc<crate::consent::ProtectedResourceOwnershipStore>,
@@ -88,6 +98,29 @@ pub struct BrowserEngine {
 
 fn refuse(code: BrowserRefusalCode, msg: impl Into<String>) -> BrowserRefusal {
     BrowserRefusal::new(code, msg)
+}
+
+fn semantic_scope_refusal(
+    source_ref: &str,
+    ancestor_role: Option<&str>,
+    failure: SemanticScopeFailure,
+) -> BrowserRefusal {
+    let requested = ancestor_role.unwrap_or("the referenced subtree");
+    BrowserRefusal::new(
+        if failure == SemanticScopeFailure::SourceChanged {
+            BrowserRefusalCode::BrowserRefStale
+        } else {
+            BrowserRefusalCode::BrowserScopeUnavailable
+        },
+        format!(
+            "could not prove one same-frame semantic scope for ref {source_ref} and {requested:?}"
+        ),
+    )
+    .with_detail(json!({
+        "reason": failure.as_str(),
+        "scope_ref": source_ref,
+        "scope_ancestor_role": ancestor_role,
+    }))
 }
 
 fn authorize_live_browser_origin(
@@ -439,11 +472,20 @@ pub(crate) struct SemanticSnapshotOutcome {
     pub content_refs: Vec<SemanticListedRef>,
     pub complete: bool,
     pub scope: &'static str,
+    pub scope_anchor: Option<SemanticScopeAnchor>,
     pub selected_nodes: usize,
     pub total_nodes: usize,
     pub omissions: OmissionCounts,
     pub continuation: Option<String>,
     pub oopif: OopifStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SemanticSnapshotRequest<'a> {
+    pub(crate) scope_ref: Option<&'a str>,
+    pub(crate) scope_ancestor_role: Option<&'a str>,
+    pub(crate) query: Option<&'a str>,
+    pub(crate) continuation: Option<&'a str>,
 }
 
 pub(crate) struct BrowserTabScreenshot {
@@ -662,6 +704,7 @@ impl BrowserEngine {
             store: BrowserStore::new(),
             pool: CdpPool::new(),
             managed_browsers: Default::default(),
+            isolated_launch_breaker: Default::default(),
             existing_profile_grants: ExistingProfileGrants::new(),
             approval_broker,
             protected_resource_ownership,
@@ -1258,7 +1301,7 @@ impl BrowserEngine {
                     format!("cannot attach to tab target {cdp_target_id}: {e}"),
                 )
             })?;
-        attached
+        let cdp_session = attached
             .get("sessionId")
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -1267,7 +1310,49 @@ impl BrowserEngine {
                     BrowserRefusalCode::BrowserTabNotFound,
                     format!("attach to {cdp_target_id} returned no sessionId"),
                 )
-            })
+            })?;
+        self.subscribe_dialog_events(conn, &cdp_session, cdp_target_id)
+            .await;
+        Ok(cdp_session)
+    }
+
+    /// Chromium reports a JavaScript dialog only to sessions that enabled the
+    /// Page domain before it opened, so the first session attached to a tab
+    /// subscribes on behalf of every later caller; tab sessions stay attached
+    /// for the life of the connection. A renderer already blocked by a dialog
+    /// nobody has seen cannot answer `Page.enable`, hence the short deadline:
+    /// the subscription is best effort and `browser_dialog` retries it.
+    async fn subscribe_dialog_events(
+        &self,
+        conn: &CdpConnection,
+        cdp_session: &str,
+        cdp_target_id: &str,
+    ) {
+        // A dialog whose session detached still blocks the page; a new
+        // subscriber is the only way its close can clear the record.
+        let dialog = conn.dialog_state(cdp_target_id);
+        if dialog.as_ref().is_some_and(|dialog| !dialog.detached)
+            || conn.has_dialog_session(cdp_target_id)
+        {
+            return;
+        }
+        conn.register_dialog_session(cdp_session, cdp_target_id);
+        let enabled = conn
+            .call_with_timeout(
+                Some(cdp_session),
+                "Page.enable",
+                json!({}),
+                DIALOG_SUBSCRIPTION_TIMEOUT,
+            )
+            .await;
+        if enabled.is_err() && conn.dialog_state(cdp_target_id).is_none() {
+            conn.unregister_dialog_session(cdp_session, cdp_target_id);
+        }
+        // A blocked renderer cannot answer Page.enable, so a reply means the
+        // detached dialog closed while no session was listening.
+        if let (Ok(_), Some(stale)) = (&enabled, dialog) {
+            conn.clear_dialog_state(cdp_target_id, stale.generation);
+        }
     }
 
     // ── Binding (get_browser_state, pid + window_id mode) ──────────────
@@ -1295,9 +1380,11 @@ impl BrowserEngine {
         let mut grant = self
             .existing_profile_grant(session, transport_session, pid)
             .await?;
-        let driver_owned = self.is_driver_owned_pid_for_session(session, pid)
-            || transport_session
-                .is_some_and(|owner| self.is_driver_owned_pid_for_session(owner, pid));
+        let driver_owned = self.is_driver_owned_pid_for_session(session, pid).await
+            || match transport_session {
+                Some(owner) => self.is_driver_owned_pid_for_session(owner, pid).await,
+                None => false,
+            };
         let access_class = endpoint_access_class(grant.is_some(), driver_owned, class.process_role)
             .map_err(|refusal| with_existing_profile_next_call(refusal, session, pid, window_id))?;
 
@@ -1383,7 +1470,7 @@ impl BrowserEngine {
         // target is only a window handle and must never be reported as active.
         let selected_cdp_target_id =
             selected_tab_target_id(&native.title, &candidates, candidate.cdp_window_id);
-        let mut tabs = HashMap::new();
+        let mut tabs = IndexMap::new();
         for c in candidates.iter().filter(|c| match candidate.cdp_window_id {
             Some(window_id) => c.cdp_window_id == Some(window_id),
             None => c.cdp_target_id == candidate.cdp_target_id,
@@ -1508,10 +1595,16 @@ impl BrowserEngine {
 
         match record.endpoint_access_class {
             EndpointAccessClass::DriverOwned => {
-                let lifecycle_is_live = self.is_driver_owned_pid_for_session(session, record.pid)
-                    || record.transport_session.as_deref().is_some_and(|owner| {
-                        self.is_driver_owned_pid_for_session(owner, record.pid)
-                    });
+                let lifecycle_is_live = self
+                    .is_driver_owned_pid_for_session(session, record.pid)
+                    .await
+                    || match record.transport_session.as_deref() {
+                        Some(owner) => {
+                            self.is_driver_owned_pid_for_session(owner, record.pid)
+                                .await
+                        }
+                        None => false,
+                    };
                 if !lifecycle_is_live {
                     return Err(refuse(
                         BrowserRefusalCode::BrowserConsentRequired,
@@ -1643,7 +1736,9 @@ impl BrowserEngine {
             .as_deref()
             .is_some_and(|context| context.capability_manifest().is_some())
         {
-            let live_url = self.live_top_level_url(&conn, &cdp_session).await?;
+            let live_url = self
+                .live_top_level_url(&conn, &cdp_session, &tab.cdp_target_id)
+                .await?;
             // A browser mutation admitted for a delegated session must use
             // that exact session's capability manifest. Falling back to the
             // process compatibility manifest would let a missing task-local
@@ -1668,19 +1763,38 @@ impl BrowserEngine {
         })
     }
 
+    /// The URL of the tab's live top-level document.
+    ///
+    /// The frame tree is the renderer's answer and the usual proof. While a
+    /// JavaScript dialog is open the renderer is blocked and `Page.getFrameTree`
+    /// never replies, so the browser process's own record of the target is
+    /// used instead: the document cannot navigate until the dialog is handled.
     async fn live_top_level_url(
         &self,
         conn: &CdpConnection,
         cdp_session: &str,
+        cdp_target_id: &str,
     ) -> Result<String, BrowserRefusal> {
-        let frame_tree = conn
-            .call(Some(cdp_session), "Page.getFrameTree", json!({}))
-            .await
-            .map_err(|error| {
-                route_err("could not prove the live top-level browser document", error)
-            })?;
-        frame_tree
-            .pointer("/frameTree/frame/url")
+        let (method, params, session, pointer) = if conn.dialog_state(cdp_target_id).is_some() {
+            (
+                "Target.getTargetInfo",
+                json!({ "targetId": cdp_target_id }),
+                None,
+                "/targetInfo/url",
+            )
+        } else {
+            (
+                "Page.getFrameTree",
+                json!({}),
+                Some(cdp_session),
+                "/frameTree/frame/url",
+            )
+        };
+        let reply = conn.call(session, method, params).await.map_err(|error| {
+            route_err("could not prove the live top-level browser document", error)
+        })?;
+        reply
+            .pointer(pointer)
             .and_then(Value::as_str)
             .filter(|url| !url.is_empty())
             .map(str::to_owned)
@@ -1702,7 +1816,11 @@ impl BrowserEngine {
             .revalidate_for_mutation(session, target_id, Some(tab_id))
             .await?;
         let live_url = self
-            .live_top_level_url(&validated.conn, &validated.cdp_session)
+            .live_top_level_url(
+                &validated.conn,
+                &validated.cdp_session,
+                &validated.tab.cdp_target_id,
+            )
             .await?;
         let live_origin = protected_live_origin_scope(&live_url)?;
         Ok((validated, live_origin))
@@ -1860,6 +1978,87 @@ impl BrowserEngine {
             });
         }
         Ok(out)
+    }
+
+    /// Re-prove an ancestor-scoped continuation's exact frame/document.
+    /// Unlike legacy direct subtree scopes, ancestor scopes never accept an
+    /// unproven main frame or silently fall back from an OOPIF child target.
+    async fn semantic_scope_frame_is_live(
+        &self,
+        conn: &CdpConnection,
+        tab_session: &str,
+        frame: &FrameRef,
+    ) -> Result<bool, BrowserRefusal> {
+        let Some(identity) = frame.identity.as_ref() else {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserScopeUnavailable,
+                "the semantic scope has no frame/document identity to re-prove",
+            ));
+        };
+        let tree_error = |error| match error {
+            FrameTreeError::Unsupported => refuse(
+                BrowserRefusalCode::BrowserScopeUnavailable,
+                "the browser no longer reports the semantic scope's frame tree",
+            ),
+            FrameTreeError::Failed(error) => route_err(
+                "Page.getFrameTree failed during semantic scope revalidation",
+                error,
+            ),
+        };
+
+        let Some(oopif_target) = frame.oopif_target_id.as_deref() else {
+            return self
+                .local_frame_tree(conn, tab_session)
+                .await
+                .map(|tree| tree.proves(identity))
+                .map_err(tree_error);
+        };
+
+        let children = self
+            .attached_iframe_children(conn, tab_session)
+            .await
+            .map_err(|error| match error {
+                AttachError::Unsupported => refuse(
+                    BrowserRefusalCode::BrowserScopeUnavailable,
+                    "the browser can no longer re-prove the semantic scope's OOPIF frame",
+                ),
+                AttachError::Failed(error) => route_err(
+                    "Target.setAutoAttach failed during semantic scope revalidation",
+                    error,
+                ),
+            })?;
+        let proof = match children
+            .iter()
+            .find(|child| child.target_id == oopif_target)
+        {
+            Some(child) => self
+                .local_frame_tree(conn, &child.session_id)
+                .await
+                .map(|tree| tree.proves(identity))
+                .map_err(tree_error),
+            None => Ok(false),
+        };
+        let _ = conn
+            .call(
+                Some(tab_session),
+                "Target.setAutoAttach",
+                json!({
+                    "autoAttach": false,
+                    "waitForDebuggerOnStart": false,
+                    "flatten": true
+                }),
+            )
+            .await;
+        for child in children {
+            let _ = conn
+                .call(
+                    Some(tab_session),
+                    "Target.detachFromTarget",
+                    json!({ "sessionId": child.session_id }),
+                )
+                .await;
+        }
+        proof
     }
 
     /// Re-prove a ref's frame/document identity and return the CDP
@@ -2135,6 +2334,7 @@ impl BrowserEngine {
             };
             entries.push(RefEntry {
                 backend_node_id: c.backend_node_id,
+                upload_backend_node_id: None,
                 node_name: c.node_name,
                 label: c.label,
                 actions: Vec::new(),
@@ -2189,6 +2389,7 @@ impl BrowserEngine {
                             let Some(identity) = identity else { continue };
                             entries.push(RefEntry {
                                 backend_node_id: c.backend_node_id,
+                                upload_backend_node_id: None,
                                 node_name: c.node_name,
                                 label: c.label,
                                 actions: Vec::new(),
@@ -2480,6 +2681,7 @@ impl BrowserEngine {
         page: super::semantic::SemanticPage,
         document_complete: bool,
         scope: &'static str,
+        scope_anchor: Option<SemanticScopeAnchor>,
         oopif: OopifStatus,
         start_index: u32,
     ) -> (SemanticSnapshotOutcome, HashMap<u32, RefEntry>) {
@@ -2514,6 +2716,7 @@ impl BrowserEngine {
                 content_refs,
                 complete,
                 scope,
+                scope_anchor,
                 selected_nodes: page.selected_nodes,
                 total_nodes: page.total_nodes,
                 omissions: page.omissions,
@@ -2529,15 +2732,19 @@ impl BrowserEngine {
         session: &str,
         target_id: &str,
         tab_id: &str,
-        scope_ref: Option<&str>,
-        query: Option<&str>,
-        continuation: Option<&str>,
+        request: SemanticSnapshotRequest<'_>,
     ) -> Result<SemanticSnapshotOutcome, BrowserRefusal> {
+        let SemanticSnapshotRequest {
+            scope_ref,
+            scope_ancestor_role,
+            query,
+            continuation,
+        } = request;
         if let Some(token) = continuation {
-            if scope_ref.is_some() || query.is_some() {
+            if scope_ref.is_some() || scope_ancestor_role.is_some() || query.is_some() {
                 return Err(refuse(
                     BrowserRefusalCode::BrowserRefStale,
-                    "continuation cannot be combined with a new scope_ref or query",
+                    "continuation cannot be combined with a new scope_ref, scope_ancestor_role, or query",
                 ));
             }
             let (snapshot, continuation) = self
@@ -2553,25 +2760,52 @@ impl BrowserEngine {
             if let Some(identity) = &snapshot.semantic_root_identity {
                 let conn = self.connection_for_record(session, &record).await?;
                 let cdp_session = self.attach(&conn, &tab.cdp_target_id).await?;
-                let tree = self.local_frame_tree(&conn, &cdp_session).await.map_err(|error| {
-                    match error {
+                let tree = self
+                    .local_frame_tree(&conn, &cdp_session)
+                    .await
+                    .map_err(|error| match error {
                         FrameTreeError::Unsupported => refuse(
                             BrowserRefusalCode::BrowserRouteUnavailable,
-                            "the browser no longer reports its frame tree, so the semantic \n+                             continuation's document identity cannot be re-proven",
+                            "the browser no longer reports its frame tree, so the semantic \
+                             continuation's document identity cannot be re-proven",
                         ),
                         FrameTreeError::Failed(error) => route_err(
                             "Page.getFrameTree failed during semantic continuation revalidation",
                             error,
                         ),
-                    }
-                })?;
+                    })?;
                 if !tree.proves(identity) {
                     self.store
                         .invalidate_tab_snapshots(session, target_id, tab_id);
                     return Err(refuse(
                         BrowserRefusalCode::BrowserRefStale,
-                        "the page navigated since this semantic continuation was minted; \n+                         re-run get_browser_state to start a fresh snapshot",
+                        "the page navigated since this semantic continuation was minted; \
+                         re-run get_browser_state to start a fresh snapshot",
                     ));
+                }
+            }
+            if let Some(anchor) = continuation
+                .scope_anchor
+                .as_ref()
+                .filter(|anchor| anchor.distance > 0)
+            {
+                let conn = self.connection_for_record(session, &record).await?;
+                let cdp_session = self.attach(&conn, &tab.cdp_target_id).await?;
+                if !self
+                    .semantic_scope_frame_is_live(&conn, &cdp_session, &anchor.identity.frame)
+                    .await?
+                {
+                    self.store
+                        .invalidate_tab_snapshots(session, target_id, tab_id);
+                    return Err(refuse(
+                        BrowserRefusalCode::BrowserRefStale,
+                        "the semantic scope's frame navigated or was removed; re-run \
+                         get_browser_state to start a fresh snapshot",
+                    )
+                    .with_detail(json!({
+                        "reason": "scope_frame_changed",
+                        "scope_ref": anchor.source_ref,
+                    })));
                 }
             }
             let document = snapshot.semantic.clone().ok_or_else(|| {
@@ -2584,7 +2818,7 @@ impl BrowserEngine {
                 continuation.offset,
                 DEFAULT_SEMANTIC_NODE_BUDGET,
                 continuation.query.as_deref(),
-                continuation.scope_backend_node_id,
+                continuation.scope_identity.as_ref(),
             );
             let start_index = snapshot
                 .refs
@@ -2606,6 +2840,7 @@ impl BrowserEngine {
                 page,
                 document.complete,
                 "continuation",
+                continuation.scope_anchor.clone(),
                 oopif,
                 start_index,
             );
@@ -2624,7 +2859,8 @@ impl BrowserEngine {
                             SemanticContinuation {
                                 offset,
                                 query: continuation.query.clone(),
-                                scope_backend_node_id: continuation.scope_backend_node_id,
+                                scope_identity: continuation.scope_identity.clone(),
+                                scope_anchor: continuation.scope_anchor.clone(),
                                 oopif_supported: continuation.oopif_supported,
                                 oopif_frames: continuation.oopif_frames,
                             },
@@ -2635,12 +2871,18 @@ impl BrowserEngine {
             return Ok(outcome);
         }
 
-        let scope_backend_node_id = match scope_ref {
-            Some(external) => Some(
+        if scope_ancestor_role.is_some() && (scope_ref.is_none() || query.is_none()) {
+            return Err(refuse(
+                BrowserRefusalCode::BrowserScopeUnavailable,
+                "scope_ancestor_role requires both scope_ref and query",
+            ));
+        }
+        let scope_entry = match scope_ref {
+            Some(external) => Some((
+                external,
                 self.store
-                    .resolve_ref(session, target_id, tab_id, external)?
-                    .backend_node_id,
-            ),
+                    .resolve_ref(session, target_id, tab_id, external)?,
+            )),
             None => None,
         };
         let record = self.store.get_target(session, target_id)?;
@@ -2772,15 +3014,56 @@ impl BrowserEngine {
             semantic.complete = false;
         }
 
+        let mut scope_identity = None;
+        let scope_anchor = match &scope_entry {
+            Some((external, entry)) => {
+                match semantic.resolve_scope(external, entry, scope_ancestor_role) {
+                    Ok(anchor) => {
+                        scope_identity = Some(anchor.identity.clone());
+                        Some(anchor)
+                    }
+                    // Legacy direct subtree reads returned an empty successful
+                    // page when their backend node was absent from the fresh
+                    // semantic composition. Preserve that wire behavior while
+                    // keeping ancestor scopes strict.
+                    Err(SemanticScopeFailure::SourceMissing) if scope_ancestor_role.is_none() => {
+                        scope_identity = Some(SemanticNodeIdentity {
+                            ax_id: String::new(),
+                            frame: entry.frame.clone(),
+                        });
+                        None
+                    }
+                    Err(failure) => {
+                        return Err(semantic_scope_refusal(
+                            external,
+                            scope_ancestor_role,
+                            failure,
+                        ))
+                    }
+                }
+            }
+            None => None,
+        };
+        if let (Some(external), Some(anchor), Some(_)) =
+            (scope_ref, scope_anchor.as_ref(), scope_ancestor_role)
+        {
+            semantic
+                .validate_ancestor_subtree(&anchor.identity)
+                .map_err(|failure| {
+                    semantic_scope_refusal(external, scope_ancestor_role, failure)
+                })?;
+        }
         let page = semantic.page(
             0,
             DEFAULT_SEMANTIC_NODE_BUDGET,
             query,
-            scope_backend_node_id,
+            scope_identity.as_ref(),
         );
         let next_offset = page.next_offset;
         let snapshot_id = self.store.mint_snapshot_id();
-        let scope = if scope_ref.is_some() {
+        let scope = if scope_ancestor_role.is_some() {
+            "ancestor_subtree"
+        } else if scope_ref.is_some() {
             "subtree"
         } else if query.is_some() {
             "query"
@@ -2794,6 +3077,7 @@ impl BrowserEngine {
             page,
             semantic.complete,
             scope,
+            scope_anchor.clone(),
             oopif,
             0,
         );
@@ -2810,7 +3094,8 @@ impl BrowserEngine {
                             SemanticContinuation {
                                 offset,
                                 query: query.map(str::to_owned),
-                                scope_backend_node_id,
+                                scope_identity: scope_identity.clone(),
+                                scope_anchor: scope_anchor.clone(),
                                 oopif_supported: matches!(oopif, OopifStatus::Attached(_)),
                                 oopif_frames: oopif.frames(),
                             },
@@ -3246,6 +3531,19 @@ mod tests {
             "a root without a loader id fails the parse"
         );
         assert!(parse_frame_tree(&json!({})).is_none());
+    }
+
+    #[test]
+    fn semantic_scope_source_drift_is_stale_and_unproven_frames_are_unavailable() {
+        let changed =
+            semantic_scope_refusal("p1:7", Some("row"), SemanticScopeFailure::SourceChanged);
+        assert_eq!(changed.code, BrowserRefusalCode::BrowserRefStale);
+        assert_eq!(changed.detail.unwrap()["reason"], "source_changed");
+
+        let unproven =
+            semantic_scope_refusal("p1:7", Some("row"), SemanticScopeFailure::UnprovenFrame);
+        assert_eq!(unproven.code, BrowserRefusalCode::BrowserScopeUnavailable);
+        assert_eq!(unproven.detail.unwrap()["reason"], "unproven_frame");
     }
 
     #[cfg(feature = "yaml")]

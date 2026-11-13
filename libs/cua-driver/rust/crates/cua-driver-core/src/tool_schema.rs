@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Shared tool-parameter schema fragments + a cross-platform consistency gate.
 //!
 //! Every platform crate hand-writes its tool `input_schema` as an inline
@@ -236,9 +239,7 @@ fn session_guidance_is_exempt(tool_name: &str) -> bool {
         "start_session"
             | "end_session"
             | "get_session"
-            | "get_session_state"
             | "list_sessions"
-            | "escalate_session"
             | "set_agent_cursor_enabled"
             | "set_agent_cursor_motion"
             | "set_agent_cursor_theme"

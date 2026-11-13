@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Session-scoped target / tab / page-ref capability store.
 //!
 //! Browser target ids (`bt-<uuid>`), tab ids (`tab-<uuid>`) and page refs
@@ -19,11 +22,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use indexmap::IndexMap;
 use serde::Serialize;
 use uuid::Uuid;
 
 use super::refusal::{BrowserRefusal, BrowserRefusalCode};
-use super::semantic::SemanticDocument;
+use super::semantic::{SemanticDocument, SemanticNodeIdentity, SemanticScopeAnchor};
 use super::types::{
     BindingQuality, EndpointAccessClass, EndpointTransport, ProcessFingerprint, Rect,
 };
@@ -82,7 +86,7 @@ impl BrowserVisibility {
 /// Which frame kind a ref was minted in. Exposed on the wire as a
 /// stable string via [`FrameKind::as_str`]; everything else about the
 /// frame stays internal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FrameKind {
     /// The tab's main frame (including composed shadow DOM inside it).
     Main,
@@ -107,7 +111,7 @@ impl FrameKind {
 /// `loader_id` changes on every document load, so equality against the
 /// live frame tree proves the ref's document is still the one that was
 /// snapshotted.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FrameIdentity {
     pub frame_id: String,
     pub loader_id: String,
@@ -118,7 +122,7 @@ pub struct FrameIdentity {
 /// - `kind != Main` ⇒ `identity` is `Some` (unprovable frames are
 ///   omitted from snapshots, never guessed).
 /// - `kind == Oopif` ⇔ `oopif_target_id` is `Some`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FrameRef {
     pub kind: FrameKind,
     /// CDP target id of the OOPIF child target (contained beneath the
@@ -150,6 +154,11 @@ pub struct RefEntry {
     /// named by `frame.oopif_target_id`.
     #[serde(skip_serializing)]
     pub backend_node_id: i64,
+    /// Exact file input selected when a visible semantic chooser is explicitly
+    /// and uniquely associated with one `<input type=file>` (usually hidden).
+    /// Legacy refs and direct file-input refs can use `backend_node_id`.
+    #[serde(skip_serializing)]
+    pub upload_backend_node_id: Option<i64>,
     pub node_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -184,7 +193,8 @@ pub struct SnapshotRecord {
 pub struct SemanticContinuation {
     pub offset: usize,
     pub query: Option<String>,
-    pub scope_backend_node_id: Option<i64>,
+    pub(crate) scope_identity: Option<SemanticNodeIdentity>,
+    pub(crate) scope_anchor: Option<SemanticScopeAnchor>,
     pub oopif_supported: bool,
     pub oopif_frames: usize,
 }
@@ -228,7 +238,7 @@ pub struct TargetRecord {
     /// CDP browser window id, or None for the exact single-page embedded route.
     pub cdp_window_id: Option<i64>,
     pub quality: BindingQuality,
-    pub tabs: HashMap<String, TabRecord>,
+    pub tabs: IndexMap<String, TabRecord>,
 }
 
 #[derive(Default)]
@@ -488,7 +498,7 @@ mod tests {
             cdp_target_id: "CDP1".into(),
             cdp_window_id: Some(11),
             quality: BindingQuality::Exact,
-            tabs: HashMap::new(),
+            tabs: IndexMap::new(),
         }
     }
 
@@ -504,6 +514,7 @@ mod tests {
                 0,
                 RefEntry {
                     backend_node_id: 555,
+                    upload_backend_node_id: None,
                     node_name: "button".into(),
                     label: Some("Submit".into()),
                     actions: Vec::new(),

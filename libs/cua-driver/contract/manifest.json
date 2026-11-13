@@ -233,6 +233,9 @@
               "null"
             ]
           },
+          "fast_path": {
+            "type": "object"
+          },
           "hint": {
             "type": [
               "string",
@@ -674,6 +677,9 @@
               "null"
             ]
           },
+          "fast_path": {
+            "type": "object"
+          },
           "hint": {
             "type": [
               "string",
@@ -769,124 +775,6 @@
         "required": [
           "session",
           "active"
-        ],
-        "type": "object"
-      }
-    },
-    {
-      "name": "escalate_session",
-      "description": "Deprecated compatibility tool for legacy capture-scope sessions. New callers select window or desktop modality on each action. No deescalate_session tool exists.",
-      "platforms": [
-        "macos",
-        "windows",
-        "linux"
-      ],
-      "capabilities": [
-        "session.capture_scope.escalate"
-      ],
-      "annotations": {
-        "read_only": false,
-        "destructive": false,
-        "idempotent": false,
-        "open_world": false
-      },
-      "schema_mode": "canonical_runtime",
-      "cursor_semantics": {
-        "action": "system"
-      },
-      "input_schema": {
-        "additionalProperties": true,
-        "properties": {
-          "detail": {
-            "description": "Optional bounded diagnostic detail. Never use secrets or page content.",
-            "maxLength": 200,
-            "type": "string"
-          },
-          "reason": {
-            "description": "Why the window-scoped attempt failed and desktop capture is needed.",
-            "enum": [
-              "ax_tree_pixel_mismatch",
-              "background_delivery_failed",
-              "foreground_ineffective",
-              "no_window_target",
-              "other"
-            ],
-            "type": "string"
-          },
-          "session": {
-            "description": "Public label of the legacy capture-scope session to escalate.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "session",
-          "reason"
-        ],
-        "type": "object"
-      },
-      "success_output_schema": {
-        "additionalProperties": true,
-        "properties": {
-          "capture_scope": {
-            "enum": [
-              "auto",
-              "window",
-              "desktop"
-            ],
-            "type": "string"
-          },
-          "desktop_capture_authorized": {
-            "type": "boolean"
-          },
-          "desktop_unlocked": {
-            "type": "boolean"
-          },
-          "effective_scope": {
-            "enum": [
-              "window",
-              "desktop"
-            ],
-            "type": "string"
-          },
-          "escalation_detail": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "escalation_reason": {
-            "anyOf": [
-              {
-                "enum": [
-                  "ax_tree_pixel_mismatch",
-                  "background_delivery_failed",
-                  "foreground_ineffective",
-                  "no_window_target",
-                  "other"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "session": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "session",
-          "capture_scope",
-          "effective_scope",
-          "desktop_capture_authorized",
-          "desktop_unlocked",
-          "escalation_reason",
-          "escalation_detail"
         ],
         "type": "object"
       }
@@ -1498,105 +1386,6 @@
           "recording_active",
           "idle_seconds",
           "expires_in_seconds"
-        ],
-        "type": "object"
-      }
-    },
-    {
-      "name": "get_session_state",
-      "description": "Deprecated compatibility alias that reads a live legacy session's capture policy. Use get_session for lifecycle state.",
-      "platforms": [
-        "macos",
-        "windows",
-        "linux"
-      ],
-      "capabilities": [
-        "session.capture_scope.read"
-      ],
-      "annotations": {
-        "read_only": true,
-        "destructive": false,
-        "idempotent": true,
-        "open_world": false
-      },
-      "schema_mode": "canonical_runtime",
-      "cursor_semantics": {
-        "action": "system"
-      },
-      "input_schema": {
-        "additionalProperties": true,
-        "properties": {
-          "session": {
-            "description": "Optional public label. When omitted, inspect the caller's attached\nimplicit session.",
-            "type": "string"
-          }
-        },
-        "required": [],
-        "type": "object"
-      },
-      "success_output_schema": {
-        "additionalProperties": true,
-        "properties": {
-          "capture_scope": {
-            "enum": [
-              "auto",
-              "window",
-              "desktop"
-            ],
-            "type": "string"
-          },
-          "desktop_capture_authorized": {
-            "type": "boolean"
-          },
-          "desktop_unlocked": {
-            "type": "boolean"
-          },
-          "effective_scope": {
-            "enum": [
-              "window",
-              "desktop"
-            ],
-            "type": "string"
-          },
-          "escalation_detail": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "escalation_reason": {
-            "anyOf": [
-              {
-                "enum": [
-                  "ax_tree_pixel_mismatch",
-                  "background_delivery_failed",
-                  "foreground_ineffective",
-                  "no_window_target",
-                  "other"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "session": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "session",
-          "capture_scope",
-          "effective_scope",
-          "desktop_capture_authorized",
-          "desktop_unlocked",
-          "escalation_reason",
-          "escalation_detail"
         ],
         "type": "object"
       }
@@ -2226,6 +2015,9 @@
               "null"
             ]
           },
+          "fast_path": {
+            "type": "object"
+          },
           "hint": {
             "type": [
               "string",
@@ -2286,7 +2078,8 @@
       ],
       "capabilities": [
         "menu.path.invoke",
-        "accessibility.menu.native"
+        "accessibility.menu.native",
+        "input.delivery_mode"
       ],
       "annotations": {
         "read_only": false,
@@ -2302,6 +2095,14 @@
         "additionalProperties": false,
         "description": "Exact, immediate-child application menu path to resolve and invoke through\nthe operating system's accessibility API. Path labels are matched after\ntrimming surrounding whitespace and otherwise remain case-sensitive. On\nmacOS, three periods in a label also match the ellipsis character that\nnative menu titles use (`Save As...` finds `Save As…`).",
         "properties": {
+          "delivery_mode": {
+            "description": "`background` (default) never takes the user's keyboard or pointer and refuses with\n`background_unavailable` when the item can only be reached by opening a menu. `foreground`\nis the explicit escalation that may activate the window and open menus. Linux honors it;\nmacOS and Windows accept it and keep their existing menu behavior.",
+            "enum": [
+              "background",
+              "foreground"
+            ],
+            "type": "string"
+          },
           "path": {
             "description": "Menu labels from the top-level menu to the item, e.g. `[\"File\", \"Save As...\"]`\n(1 to 16 labels).",
             "items": {
@@ -2456,6 +2257,9 @@
               "array",
               "null"
             ]
+          },
+          "fast_path": {
+            "type": "object"
           },
           "hint": {
             "type": [
@@ -3086,6 +2890,9 @@
               "array",
               "null"
             ]
+          },
+          "fast_path": {
+            "type": "object"
           },
           "hint": {
             "type": [
@@ -3830,6 +3637,9 @@
               "null"
             ]
           },
+          "fast_path": {
+            "type": "object"
+          },
           "hint": {
             "type": [
               "string",
@@ -4104,6 +3914,9 @@
               "array",
               "null"
             ]
+          },
+          "fast_path": {
+            "type": "object"
           },
           "hint": {
             "type": [
@@ -4753,6 +4566,9 @@
               "null"
             ]
           },
+          "fast_path": {
+            "type": "object"
+          },
           "hint": {
             "type": [
               "string",
@@ -5151,33 +4967,6 @@
             ],
             "type": "string"
           },
-          "escalation_detail": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "escalation_reason": {
-            "anyOf": [
-              {
-                "enum": [
-                  "ax_tree_pixel_mismatch",
-                  "background_delivery_failed",
-                  "foreground_ineffective",
-                  "no_window_target",
-                  "other"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "revived": {
             "type": "boolean"
           },
@@ -5191,8 +4980,6 @@
           "effective_scope",
           "desktop_capture_authorized",
           "desktop_unlocked",
-          "escalation_reason",
-          "escalation_detail",
           "active",
           "revived"
         ],
@@ -5398,6 +5185,9 @@
               "array",
               "null"
             ]
+          },
+          "fast_path": {
+            "type": "object"
           },
           "hint": {
             "type": [

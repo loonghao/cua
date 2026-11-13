@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Internal, non-wire representation of what an action actually did.
 //!
 //! This deliberately has no serde derives: it is the driver's source of truth,
@@ -460,6 +463,7 @@ impl ActionExecutionRecord {
             // The dispatch seam adds these after the record is projected.
             hint: None,
             next_call: None,
+            fast_path: None,
         })
     }
 
@@ -710,7 +714,8 @@ fn browser_refusal_escalation(code: &str) -> Option<ActionEscalation> {
         | "browser_tab_not_found"
         | "browser_ref_stale"
         | "browser_input_trust_unavailable"
-        | "browser_action_unavailable" => EscalationKind::RefreshPageState,
+        | "browser_action_unavailable"
+        | "browser_scope_unavailable" => EscalationKind::RefreshPageState,
         // A delivered prefix is already represented by `effect: partial` and
         // `delivery.delivered_count`; verification decides whether to stop.
         "browser_input_incomplete" => return None,

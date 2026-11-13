@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Enumerate running processes on Windows.
 //!
 //! Uses CreateToolhelp32Snapshot / Process32FirstW / Process32NextW (simpler
@@ -67,4 +70,116 @@ pub fn list_descendants(root_pid: u32) -> Vec<u32> {
 /// Executable-name similarity does not establish launch ancestry.
 pub fn related_processes(root_pid: u32, _exe_basename: &str) -> Vec<u32> {
     related_processes_from_processes(root_pid, _exe_basename, &list_processes())
+}
+
+/// Return the launched PID and only its descendants absent before launch.
+/// Executable names do not establish ownership. The root comes from the native
+/// launch receipt and remains valid even when its window has not appeared yet.
+pub fn launched_processes(
+    root_pid: u32,
+    pre_launch_pids: &std::collections::HashSet<u32>,
+) -> Vec<u32> {
+    launched_processes_from_snapshot(root_pid, pre_launch_pids, &list_processes())
+}
+
+fn launched_processes_from_snapshot(
+    root_pid: u32,
+    pre_launch_pids: &std::collections::HashSet<u32>,
+    current: &[ProcessInfo],
+) -> Vec<u32> {
+    if root_pid == 0 {
+        return Vec::new();
+    }
+    // Remove old branches before traversal so a reused parent PID cannot make
+    // another application's newly spawned children part of this launch.
+    let eligible: Vec<_> = current
+        .iter()
+        .filter(|process| process.pid == root_pid || !pre_launch_pids.contains(&process.pid))
+        .cloned()
+        .collect();
+    descendants_from_processes(root_pid, &eligible)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process(pid: u32, parent_pid: u32) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            parent_pid,
+            name: format!("process-{pid}.exe"),
+        }
+    }
+
+    #[test]
+    fn descendants_include_root_and_only_its_transitive_process_tree() {
+        let processes = vec![
+            process(42, 1),
+            process(43, 42),
+            process(44, 43),
+            process(45, 42),
+            process(99, 1),
+            process(100, 99),
+        ];
+
+        let descendants = descendants_from_processes(42, &processes);
+
+        assert_eq!(descendants, vec![42, 43, 45, 44]);
+        assert!(!descendants.contains(&99));
+        assert!(!descendants.contains(&100));
+    }
+
+    #[test]
+    fn launch_does_not_adopt_existing_or_new_same_name_processes() {
+        let mut processes = vec![process(42, 1), process(99, 1), process(100, 1)];
+        for entry in &mut processes {
+            entry.name = "maya.exe".into();
+        }
+        let before = [99].into_iter().collect();
+        assert_eq!(
+            launched_processes_from_snapshot(42, &before, &processes),
+            vec![42]
+        );
+    }
+
+    #[test]
+    fn launch_keeps_renamed_descendants_after_launcher_exit() {
+        let mut child = process(43, 42);
+        child.name = "soffice.bin".into();
+        let processes = vec![child, process(44, 43)];
+        assert_eq!(
+            launched_processes_from_snapshot(42, &Default::default(), &processes),
+            vec![42, 43, 44]
+        );
+    }
+
+    #[test]
+    fn launch_prunes_existing_pid_branches_and_their_new_children() {
+        let processes = vec![
+            process(42, 1),
+            process(43, 42),
+            process(44, 43),
+            process(45, 42),
+        ];
+        let before = [43].into_iter().collect();
+        assert_eq!(
+            launched_processes_from_snapshot(42, &before, &processes),
+            vec![42, 45]
+        );
+    }
+
+    #[test]
+    fn launch_retains_receipt_pid_when_no_window_process_is_available() {
+        assert_eq!(
+            launched_processes_from_snapshot(42, &Default::default(), &[]),
+            vec![42]
+        );
+    }
+
+    #[test]
+    fn launch_without_a_native_pid_receipt_has_no_owned_candidates() {
+        let processes = vec![process(99, 0), process(100, 99)];
+        assert!(launched_processes_from_snapshot(0, &Default::default(), &processes).is_empty());
+    }
 }

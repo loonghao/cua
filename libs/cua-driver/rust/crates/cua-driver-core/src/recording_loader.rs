@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Read a `start_recording` output directory into the inputs the
 //! renderer needs: `SessionMetadata` block, sorted `[ClickEvent]`,
 //! sorted `[CursorSample]`, and sorted `[ActionSpan]`. Pure file I/O
@@ -131,22 +134,24 @@ fn load_session_metadata(
 /// parseable — the renderer falls back to 1920×1080 only as an
 /// absolute last resort.
 fn probe_video_dimensions(video_path: &Path) -> Option<(u32, u32)> {
-    use std::process::Command;
     let ffprobe = crate::video_ffmpeg::find_ffprobe()?;
-    let out = Command::new(ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0:s=x",
-        ])
-        .arg(video_path)
-        .output()
-        .ok()?;
+    let out = crate::owned_process::command(
+        crate::owned_process::OwnedConsoleChildRole::RecordingFfprobe,
+        ffprobe,
+    )
+    .args([
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0:s=x",
+    ])
+    .arg(video_path)
+    .output()
+    .ok()?;
     if !out.status.success() {
         return None;
     }

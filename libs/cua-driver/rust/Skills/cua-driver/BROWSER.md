@@ -352,6 +352,23 @@ get_browser_state
     "query":"Account settings"}'
 ```
 
+When repeated containers expose identical actions, start from a current
+semantic ref inside the intended container and request its nearest strict
+same-frame ancestor role:
+
+```bash
+cua-driver get_browser_state \
+  '{"target_id":"<target>","tab_id":"<tab>",
+    "session":"browser-run-1","snapshot_format":"semantic_v2",
+    "scope_ref":"p1:7","scope_ancestor_role":"row",
+    "query":"View release options"}'
+```
+
+Require `snapshot.scope == "ancestor_subtree"` and inspect
+`snapshot.scope_anchor` (`requested_ref`, `role`, `frame`, and `distance`).
+`browser_scope_unavailable` is a closed refusal to refresh page state, not
+permission to retry the query without its scope.
+
 Refs remain scoped to the session, target, tab, document, frame, and latest
 snapshot. Navigation and newer snapshots invalidate old refs. A stale-ref
 refusal means snapshot again; it is not permission to fall back to a CSS
@@ -482,7 +499,11 @@ driver refuses that mode before dispatch; retry explicitly with
 Use a current semantic ref whose `actions` contains `upload`, then call
 `browser_set_input_files` with one to 32 absolute regular-file paths. The tool
 rejects symlinks and directories, bypasses the native file picker, and returns
-only the assigned file count. Paths are redacted from trajectory arguments.
+only the assigned file count. A visible chooser can expose `upload` when its
+DOM label or `aria-controls` relation identifies exactly one enabled file input
+in the same frame and tree scope, including a CSS-hidden input. Duplicate ids,
+multiple candidates, unrelated nearby inputs, and cross-frame or cross-shadow
+associations fail closed. Paths are redacted from trajectory arguments.
 
 ### Downloads
 
@@ -515,11 +536,19 @@ AX/PX ladder for browser chrome.
 The legacy `page` tool remains a compatibility surface for older clients. Do
 not start new browser workflows with it: its backend and trust semantics are
 less precise than the typed browser tools, and it does not replace exact
-window binding. Its mutations are disabled by default. Only a trusted daemon
-operator can enable the temporary compatibility path with
-`CUA_DRIVER_ENABLE_LEGACY_PAGE_MUTATIONS=1` before daemon startup. Restart Cua
-Driver after changing the flag. It does not add typed endpoint ownership,
-capabilities, or existing-profile consent.
+window binding. It is read-only: only `get_text` and `query_dom` remain, and
+they are the way to read Safari and Firefox pages. Its page actions (run
+JavaScript, click, type) were removed, along with the
+`CUA_DRIVER_ENABLE_LEGACY_PAGE_MUTATIONS` switch; act on a page with the typed
+`browser_*` tools.
+
+On macOS, legacy `page.get_text` and `page.query_dom` keep their original text
+payload but also report read provenance in `structuredContent.source`:
+`javascript`, `cdp`, or `ax_fallback`. When JavaScript or CDP fails and the AX
+fallback succeeds, `structuredContent.fallback_error` preserves the triggering
+error and `structuredContent.truncated` reports whether the bounded AX walk was
+cut short. A direct WKWebView/Tauri AX read has no `fallback_error` because no
+JavaScript or CDP route was attempted.
 
 ## Support boundaries
 
@@ -549,6 +578,8 @@ result from the current host, process, window, session, and tab.
 - `browser_binding_ambiguous` or heuristic binding: resolve the native-window
   ambiguity and bind again; do not mutate.
 - `browser_ref_stale`: snapshot again and use a new ref.
+- `browser_scope_unavailable`: refresh page state and obtain a new semantic
+  ref; never widen the request to a page-wide query.
 - `browser_action_unavailable`: choose a ref that declares the requested
   action; never treat a readable `content_ref` as clickable or editable.
 - `browser_input_trust_unavailable`: either request `dom_event` when its
