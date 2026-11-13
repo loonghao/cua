@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Console-free construction for bounded Windows diagnostic helpers.
 //!
 //! These children keep their normal stdio and lifetime semantics; only the

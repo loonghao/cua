@@ -129,7 +129,11 @@ pub(super) struct FixtureState {
     page_enable_hangs: bool,
 
     dom_click_changes_readback: bool,
+    /// A trusted `mouseReleased` changes the target's semantic readback.
+    trusted_click_changes_readback: bool,
     dom_click_readback_available: bool,
+    /// `DOM.resolveNode` answers a CDP error.
+    resolve_node_fails: bool,
     dom_click_stall_after: Option<usize>,
     dom_click_generation: u64,
     dom_click_focused: bool,
@@ -196,7 +200,9 @@ impl Default for FixtureState {
             drift_after_readback: false,
             select_outcome: Value::Null,
             dom_click_changes_readback: true,
+            trusted_click_changes_readback: false,
             dom_click_readback_available: true,
+            resolve_node_fails: false,
             dom_click_stall_after: None,
             dom_click_generation: 0,
             dom_click_focused: false,
@@ -1200,11 +1206,19 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     .collect();
                 MockReply::hang().with_events(events)
             }
+            "Input.dispatchMouseEvent" => {
+                if st.trusted_click_changes_readback && call.params["type"] == "mouseReleased" {
+                    st.dom_click_generation += 1;
+                }
+                MockReply::ok(json!({}))
+            }
             "DOM.focus"
             | "Emulation.setFocusEmulationEnabled"
-            | "Input.dispatchMouseEvent"
             | "Input.insertText"
             | "DOM.setFileInputFiles" => MockReply::ok(json!({})),
+            "DOM.resolveNode" if st.resolve_node_fails => {
+                MockReply::err(-32000, "No node with given id")
+            }
             "DOM.resolveNode" => MockReply::ok(json!({
                 "object": { "objectId": format!("obj-{}", call.params["backendNodeId"]) }
             })),
@@ -3094,6 +3108,38 @@ async fn semantic_ancestor_continuation_revalidates_the_oopif_loader() {
     assert_eq!(stale["status"], "refused", "{stale}");
     assert_eq!(stale["refusal"]["code"], "browser_ref_stale");
     assert_eq!(stale["refusal"]["detail"]["reason"], "scope_frame_changed");
+}
+
+#[tokio::test]
+async fn ancestor_scope_missing_from_fresh_semantics_never_falls_back_to_the_page() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let seeded = semantic_snapshot_with(&f, &target, &tab, json!({"query": "main-btn"})).await;
+    let source_ref = seeded["refs"]
+        .as_array()
+        .and_then(|refs| refs.first())
+        .and_then(|entry| entry["ref"].as_str())
+        .expect("main action ref")
+        .to_owned();
+    // Replace the old node in the same live document. A missing ancestor
+    // anchor must not silently turn a narrow request into a page-wide read.
+    f.state.lock().unwrap().semantic_large_page = true;
+    let scoped = semantic_snapshot_with(
+        &f,
+        &target,
+        &tab,
+        json!({
+            "scope_ref": source_ref,
+            "scope_ancestor_role": "row",
+            "query": "Archive"
+        }),
+    )
+    .await;
+    assert_eq!(scoped["status"], "refused", "{scoped}");
+    assert_eq!(scoped["refusal"]["code"], "browser_scope_unavailable");
+    assert_eq!(scoped["refusal"]["detail"]["reason"], "source_missing");
+    assert!(scoped.get("snapshot").is_none(), "{scoped}");
+    assert!(scoped.get("refs").is_none(), "{scoped}");
 }
 
 #[tokio::test]
@@ -5452,4 +5498,148 @@ async fn a_detached_dialog_that_closed_unseen_stops_blocking_clicks() {
         .await;
     assert_ne!(clicked.is_error, Some(true), "{:?}", structured(&clicked));
     assert!(!recorded_calls(&f, "Input.dispatchMouseEvent").is_empty());
+}
+
+fn public_click_result(result: &ToolResult) -> Value {
+    let public = result
+        .action_record
+        .as_ref()
+        .expect("typed browser click action record")
+        .public_result()
+        .expect("public browser click result");
+    serde_json::to_value(public).expect("serialize public result")
+}
+
+#[tokio::test]
+async fn trusted_ref_click_confirms_a_target_state_change() {
+    let f = fixture_with(|state| state.trusted_click_changes_readback = true).await;
+    let (target, tab) = bind(&f).await;
+    let snap = snapshot(&f, &target, &tab).await;
+    let main_ref = ref_of(&snap, "main", "main-btn");
+
+    let result = BrowserClickTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target, "tab_id": tab, "ref": main_ref, "session": SESSION
+        }))
+        .await;
+
+    assert_eq!(structured(&result)["route"], "trusted");
+    assert!(result.content.iter().any(|content| matches!(
+        content,
+        Content::Text { text, .. } if text.contains("confirmed a target-state change")
+    )));
+    let public = public_click_result(&result);
+    assert_eq!(public["effect"], "confirmed", "{public}");
+    assert_eq!(public["route"], "trusted_input", "{public}");
+    assert_eq!(public["delivery"]["mode"], "background", "{public}");
+    assert_eq!(public["evidence"][0]["kind"], "value_readback", "{public}");
+    assert!(public["escalation"].is_null(), "{public}");
+    let mouse = recorded_calls(&f, "Input.dispatchMouseEvent");
+    assert_eq!(mouse.len(), 2, "press and release: {mouse:?}");
+}
+
+#[tokio::test]
+async fn trusted_ref_click_that_changes_nothing_is_unverifiable_with_readback() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let snap = snapshot(&f, &target, &tab).await;
+    let main_ref = ref_of(&snap, "main", "main-btn");
+
+    let result = BrowserClickTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target, "tab_id": tab, "ref": main_ref,
+            "delivery_mode": "foreground", "session": SESSION
+        }))
+        .await;
+
+    assert!(result.content.iter().any(|content| matches!(
+        content,
+        Content::Text { text, .. }
+            if text.contains("target state remained unchanged; application effect is unverifiable")
+    )));
+    let public = public_click_result(&result);
+    assert_eq!(public["effect"], "unverifiable", "{public}");
+    assert_eq!(public["route"], "trusted_input", "{public}");
+    assert_eq!(public["delivery"]["mode"], "foreground", "{public}");
+    assert_eq!(public["evidence"][0]["kind"], "value_readback", "{public}");
+    assert_eq!(
+        public["escalation"]["reason"], "effect_unconfirmed",
+        "{public}"
+    );
+}
+
+#[tokio::test]
+async fn trusted_ref_click_without_readback_is_unverifiable_without_evidence() {
+    let f = fixture_with(|state| {
+        state.trusted_click_changes_readback = true;
+        state.dom_click_readback_available = false;
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let snap = snapshot(&f, &target, &tab).await;
+    let main_ref = ref_of(&snap, "main", "main-btn");
+
+    let result = BrowserClickTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target, "tab_id": tab, "ref": main_ref, "session": SESSION
+        }))
+        .await;
+
+    let public = public_click_result(&result);
+    assert_eq!(public["effect"], "unverifiable", "{public}");
+    assert!(public["evidence"].is_null(), "{public}");
+    assert!(!recorded_calls(&f, "Input.dispatchMouseEvent").is_empty());
+}
+
+#[tokio::test]
+async fn trusted_coordinate_click_has_no_target_to_read_back() {
+    let f = fixture_with(|state| state.trusted_click_changes_readback = true).await;
+    let (target, tab) = bind(&f).await;
+
+    let result = BrowserClickTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target, "tab_id": tab, "x": 10, "y": 20, "session": SESSION
+        }))
+        .await;
+
+    assert_eq!(structured(&result)["status"], "ok");
+    assert!(result.action_record.is_none());
+    assert!(recorded_calls(&f, "DOM.resolveNode").is_empty());
+    let public = ActionExecutionRecord::from_legacy(
+        "browser_click",
+        &json!({ "x": 10, "y": 20 }),
+        structured(&result),
+    )
+    .expect("browser click action record")
+    .public_result()
+    .expect("public browser click result");
+    let public = serde_json::to_value(public).expect("serialize public result");
+    assert_eq!(public["effect"], "unverifiable", "{public}");
+}
+
+#[tokio::test]
+async fn trusted_ref_click_whose_node_does_not_resolve_is_unverifiable_without_evidence() {
+    let f = fixture_with(|state| {
+        state.trusted_click_changes_readback = true;
+        state.resolve_node_fails = true;
+    })
+    .await;
+    let (target, tab) = bind(&f).await;
+    let snap = snapshot(&f, &target, &tab).await;
+    let main_ref = ref_of(&snap, "main", "main-btn");
+
+    let result = BrowserClickTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target, "tab_id": tab, "ref": main_ref, "session": SESSION
+        }))
+        .await;
+
+    assert!(result.content.iter().any(|content| matches!(
+        content,
+        Content::Text { text, .. } if text.contains("semantic target readback was unavailable")
+    )));
+    let public = public_click_result(&result);
+    assert_eq!(public["effect"], "unverifiable", "{public}");
+    assert!(public["evidence"].is_null(), "{public}");
+    assert_eq!(recorded_calls(&f, "Input.dispatchMouseEvent").len(), 2);
 }
