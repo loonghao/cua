@@ -1383,7 +1383,7 @@ impl BrowserPlatform for FixturePlatform {
     fn restore_frontmost_app(&self, previous_pid: i64, browser_pid: i64) -> bool {
         if let Some(state) = &self.endpoint_state {
             state.lock().unwrap().calls.push((
-                String::new(),
+                None,
                 "native.restore_frontmost_app".into(),
                 json!({"previous_pid": previous_pid, "browser_pid": browser_pid}),
             ));
