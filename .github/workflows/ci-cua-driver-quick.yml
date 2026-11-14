@@ -25,9 +25,16 @@ env:
 
 jobs:
   focused:
-    name: "Linux / focused contracts (not desktop certification)"
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: "${{ matrix.os }} / focused contracts (not desktop certification)"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
@@ -51,3 +58,11 @@ jobs:
           cargo test --locked -p cua-driver-contract --test visual_contract
           cargo test --locked -p cua-perception --test protocol
           cargo test --locked -p cua-driver-core --lib
+      - name: Compile Windows adapter without desktop execution
+        if: runner.os == 'Windows'
+        working-directory: libs/cua-driver/rust
+        run: cargo check --locked -p platform-windows --all-targets
+      - name: Compile macOS adapter without desktop execution
+        if: runner.os == 'macOS'
+        working-directory: libs/cua-driver/rust
+        run: cargo check --locked -p platform-macos --all-targets
