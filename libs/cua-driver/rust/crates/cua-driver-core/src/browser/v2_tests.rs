@@ -55,6 +55,8 @@ pub(super) struct FixtureState {
     oopif_present: bool,
     emit_rogue_attach: bool,
     main_url: String,
+    main_title: String,
+    native_window_title: String,
     main_loader: String,
     iframe_loader: String,
     oopif_loader: String,
@@ -103,6 +105,7 @@ pub(super) struct FixtureState {
     /// Extra page targets living in the bound window, after T1 in the
     /// browser's `Target.getTargets` order.
     sibling_tabs: Vec<Value>,
+    native_peers: Option<Vec<NativeWindowInfo>>,
     /// Drop the primary tab target T1 from `Target.getTargets`.
     omit_primary_target: bool,
     /// Make `Browser.getWindowForTarget` for T1 answer this CDP error.
@@ -153,8 +156,11 @@ impl Default for FixtureState {
             oopif_present: true,
             emit_rogue_attach: false,
             main_url: "https://fixture.test/".into(),
+            main_title: "Fixture".into(),
+            native_window_title: "Fixture - Chrome".into(),
             windowless_targets: Vec::new(),
             sibling_tabs: Vec::new(),
+            native_peers: None,
             omit_primary_target: false,
             primary_window_error: None,
             dialog_open: false,
@@ -779,7 +785,7 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     infos.push(json!({
                         "targetId": "T1",
                         "type": "page",
-                        "title": "Fixture",
+                        "title": st.main_title,
                         "url": "https://fixture.test/",
                         "attached": false,
                     }));
@@ -808,7 +814,13 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                 } else if let Some((code, message)) = st.primary_window_error.clone() {
                     MockReply::err(code, &message)
                 } else {
-                    MockReply::ok(json!({ "windowId": 11 }))
+                    let window_id = st
+                        .sibling_tabs
+                        .iter()
+                        .find(|tab| tab["targetId"].as_str() == Some(target_id))
+                        .and_then(|tab| tab["windowId"].as_i64())
+                        .unwrap_or(11);
+                    MockReply::ok(json!({ "windowId": window_id }))
                 }
             }
             "Browser.getWindowBounds" => MockReply::ok(json!({
@@ -1369,6 +1381,13 @@ impl BrowserPlatform for FixturePlatform {
     }
 
     fn restore_frontmost_app(&self, previous_pid: i64, browser_pid: i64) -> bool {
+        if let Some(state) = &self.endpoint_state {
+            state.lock().unwrap().calls.push((
+                None,
+                "native.restore_frontmost_app".into(),
+                json!({"previous_pid": previous_pid, "browser_pid": browser_pid}),
+            ));
+        }
         self.focus
             .restores
             .lock()
@@ -1399,7 +1418,11 @@ impl BrowserPlatform for FixturePlatform {
         Ok(NativeWindowInfo {
             pid,
             window_id,
-            title: "Fixture - Chrome".into(),
+            title: self
+                .endpoint_state
+                .as_ref()
+                .map(|state| state.lock().unwrap().native_window_title.clone())
+                .unwrap_or_else(|| "Fixture - Chrome".into()),
             bounds: Rect::new(0.0, 0.0, 800.0, 600.0),
             geometry_exact: true,
             ownership: NativeOwnershipProof {
@@ -1408,6 +1431,16 @@ impl BrowserPlatform for FixturePlatform {
                 detail: None,
             },
         })
+    }
+
+    async fn native_windows(
+        &self,
+        _pid: i64,
+    ) -> Result<Option<Vec<NativeWindowInfo>>, BrowserRefusal> {
+        Ok(self
+            .endpoint_state
+            .as_ref()
+            .and_then(|state| state.lock().unwrap().native_peers.clone()))
     }
 
     async fn is_only_exact_native_window(
@@ -5642,4 +5675,136 @@ async fn trusted_ref_click_whose_node_does_not_resolve_is_unverifiable_without_e
     assert_eq!(public["effect"], "unverifiable", "{public}");
     assert!(public["evidence"].is_null(), "{public}");
     assert_eq!(recorded_calls(&f, "Input.dispatchMouseEvent").len(), 2);
+}
+
+// A background tab in another same-sized window must not compete with the
+// requested window's selected tab (trycua/cua#7362).
+fn same_bounds_peer_fixture(st: &mut FixtureState, peer_title: &str) {
+    st.sibling_tabs = vec![
+        json!({"targetId":"PEER_SELECTED", "type":"page", "title":"Other page", "url":"https://peer.test/", "windowId":22}),
+        json!({"targetId":"PEER_BACKGROUND", "type":"page", "title":"Fixture", "url":"https://background.test/", "windowId":22}),
+    ];
+    let native = |window_id, title: &str| NativeWindowInfo {
+        pid: 1,
+        window_id,
+        title: title.into(),
+        bounds: Rect::new(0.0, 0.0, 800.0, 600.0),
+        geometry_exact: true,
+        ownership: NativeOwnershipProof {
+            method: NativeOwnershipMethod::WindowServerOwner,
+            owner_pid: 1,
+            detail: None,
+        },
+    };
+    st.native_peers = Some(vec![native(7, "Fixture - Chrome"), native(8, peer_title)]);
+}
+
+#[tokio::test]
+async fn same_bounds_peer_background_tab_does_not_prevent_binding() {
+    let f = fixture_with(|st| same_bounds_peer_fixture(st, "Other page - Chrome")).await;
+    let s = bind_result(&f).await;
+    assert_eq!(s["status"], "ok", "{s}");
+    assert_eq!(s["binding_quality"], "exact");
+    assert_eq!(s["tabs"].as_array().unwrap().len(), 1, "{s}");
+    assert_eq!(s["tabs"][0]["url"], "https://fixture.test/");
+    let calls = &f.state.lock().unwrap().calls;
+    assert!(!calls
+        .iter()
+        .any(|(_, method, _)| method == "Target.activateTarget" || method == "Page.bringToFront"));
+    assert!(!calls
+        .iter()
+        .any(|(_, method, params)| method == "Target.attachToTarget"
+            && params["targetId"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("PEER_"))));
+}
+
+#[tokio::test]
+async fn same_bounds_peer_duplicate_selected_title_still_refuses() {
+    let f = fixture_with(|st| same_bounds_peer_fixture(st, "Fixture - Chrome")).await;
+    let s = bind_result(&f).await;
+    assert_eq!(s["refusal"]["code"], "browser_binding_ambiguous", "{s}");
+    assert!(!f
+        .state
+        .lock()
+        .unwrap()
+        .calls
+        .iter()
+        .any(|(_, method, _)| method == "Target.attachToTarget"));
+}
+
+#[tokio::test]
+async fn same_bounds_without_a_complete_native_snapshot_still_refuses() {
+    let f = fixture_with(|st| {
+        same_bounds_peer_fixture(st, "Other page - Chrome");
+        st.native_peers = None;
+    })
+    .await;
+    let s = bind_result(&f).await;
+    assert_eq!(s["refusal"]["code"], "browser_binding_ambiguous", "{s}");
+}
+
+#[tokio::test]
+async fn opaque_peer_titles_bind_without_focus_or_renderer_observation() {
+    for (title, peer, decoration) in [
+        ("资料e\u{301}👩\u{200d}💻", "别的窗口", " — 🔷"),
+        ("\u{2067}إعدادات\u{2069}", "\u{2067}آخر\u{2069}", " — ◇"),
+        ("ניהול🧭", "חלון אחר", " — ⬡"),
+    ] {
+        let f = fixture_with(|st| {
+            same_bounds_peer_fixture(st, &format!("{peer}{decoration}"));
+            st.main_title = title.into();
+            st.native_window_title = format!("{title}{decoration}");
+            st.sibling_tabs[0]["title"] = json!(peer);
+            st.sibling_tabs[1]["title"] = json!(title);
+            let peers = st.native_peers.as_mut().unwrap();
+            peers[0].title = st.native_window_title.clone();
+            peers.reverse();
+            st.sibling_tabs.reverse();
+        })
+        .await;
+        let result = bind_result(&f).await;
+        assert_eq!(result["status"], "ok", "{result}");
+        assert_eq!(result["binding_quality"], "exact");
+        assert_eq!(result["tabs"].as_array().unwrap().len(), 1);
+        assert_eq!(result["tabs"][0]["url"], "https://fixture.test/");
+        assert!(f.state.lock().unwrap().calls.iter().all(|(_, method, _)| {
+            !matches!(
+                method.as_str(),
+                "Target.activateTarget"
+                    | "Page.bringToFront"
+                    | "Target.attachToTarget"
+                    | "Runtime.evaluate"
+                    | "native.restore_frontmost_app"
+            )
+        }));
+    }
+}
+
+#[tokio::test]
+async fn invalid_native_peer_proofs_never_mint_browser_capabilities() {
+    for invalid in 0..6 {
+        let f = fixture_with(|st| {
+            same_bounds_peer_fixture(st, "Other page - Chrome");
+            let peers = st.native_peers.as_mut().unwrap();
+            match invalid {
+                0 => peers.truncate(1),
+                1 => peers[1].ownership.owner_pid = 99,
+                2 => peers[1].geometry_exact = false,
+                3 => peers[1].window_id = peers[0].window_id,
+                4 => peers[0].title = "changed after the initial native read".into(),
+                _ => peers[1].title = peers[0].title.clone(),
+            }
+        })
+        .await;
+        let result = bind_result(&f).await;
+        assert_eq!(
+            result["refusal"]["code"], "browser_binding_ambiguous",
+            "{result}"
+        );
+        assert!(result["target_id"].is_null() && result["tabs"].is_null());
+        assert!(!f.state.lock().unwrap().calls.iter().any(|(_, method, _)| {
+            method == "Target.attachToTarget" || method == "Runtime.evaluate"
+        }));
+    }
 }

@@ -310,25 +310,32 @@ fn window_info_by_handle(hwnd: u64) -> Option<WindowInfo> {
 }
 
 pub(crate) fn list_windows_via_win32(filter_pid: Option<u32>) -> Vec<WindowInfo> {
-    let mut windows = enumerate_via_enum_windows();
+    try_list_windows_via_win32(filter_pid).unwrap_or_default()
+}
+
+/// Binding proofs must not treat a failed enumeration as a complete snapshot.
+pub(crate) fn try_list_windows_via_win32(
+    filter_pid: Option<u32>,
+) -> windows::core::Result<Vec<WindowInfo>> {
+    let mut windows = enumerate_via_enum_windows()?;
     if let Some(pid) = filter_pid {
         windows.retain(|window| window.pid == pid);
     }
-    windows
+    Ok(windows)
 }
 
 /// Walk `EnumWindows` and collect every visible, non-empty-titled
 /// top-level window. No pid filter is applied here — the caller does that on
 /// the merged list.
-fn enumerate_via_enum_windows() -> Vec<WindowInfo> {
+fn enumerate_via_enum_windows() -> windows::core::Result<Vec<WindowInfo>> {
     let state = Mutex::new(EnumState {
         windows: Vec::new(),
     });
     let state_ptr = &state as *const Mutex<EnumState> as isize;
     unsafe {
-        let _ = EnumWindows(Some(enum_windows_cb), LPARAM(state_ptr));
+        EnumWindows(Some(enum_windows_cb), LPARAM(state_ptr))?;
     }
-    state.into_inner().unwrap().windows
+    Ok(state.into_inner().unwrap().windows)
 }
 
 unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {

@@ -132,6 +132,9 @@ jobs:
     if: github.event_name == 'pull_request' || (github.event_name == 'merge_group' && vars.CI_QUEUE_RUNS == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Plan and execute the same change set as the trusted scope job.
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
     steps:
       - name: Skip when this commit already passed
         id: marker
@@ -162,7 +165,8 @@ jobs:
       - name: Install crane (only when the docs image refs are checked)
         if: steps.marker.outputs.cache-hit != 'true'
         run: |
-          if python3 bin/ci --list --quick --no-install 2>&1 | grep -q '^  docs-image-refs '; then
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          if python3 bin/ci --list --quick --no-install --base "$BASE_SHA" 2>&1 | grep -q '^  docs-image-refs '; then
             go install github.com/google/go-containerregistry/cmd/crane@v0.20.6
             echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
           fi
@@ -175,7 +179,7 @@ jobs:
         # skip, when a tool is missing on the runner.
         env:
           CUA_CI_REQUIRE_TOOLS: "1"
-        run: python3 bin/ci --quick --no-install
+        run: python3 bin/ci --quick --no-install --base "$BASE_SHA"
       - name: Write the pass marker
         if: steps.marker.outputs.cache-hit != 'true'
         run: echo "${{ github.sha }}" > "${{ runner.temp }}/ci-quick-pass"

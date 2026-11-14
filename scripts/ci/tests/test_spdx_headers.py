@@ -48,12 +48,12 @@ class DriverTreeTest(unittest.TestCase):
             self.own.read_text(encoding="utf-8"),
             "// SPDX-License-Identifier: MIT\n// Copyright (c) 2026 Cua AI, Inc.\n\n" + OWN,
         )
-        self.assertIn("libs/cua-driver/src/vendored.rs", result.stdout.split("left alone")[-1])
+        self.assertIn(str(self.vendored.relative_to(self.repo)), result.stdout.split("left alone")[-1])
 
     def test_check_does_not_ask_for_a_header_on_a_vendored_file(self):
         result = self.run_script("--check")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("missing header: libs/cua-driver/src/own.rs", result.stdout)
+        self.assertIn(f"missing header: {self.own.relative_to(self.repo)}", result.stdout)
         self.assertEqual(result.stdout.count("missing header:"), 1, result.stdout)
 
 
