@@ -545,6 +545,23 @@ def test_quick_refuses_missing_unknown_or_unrelated_base(quick_comparison, inval
     assert plans == '', plans
 
 
+def test_windows_selftest_failure_stops_before_sync():
+    workflow = yaml.safe_load((WORKFLOWS / 'ci-test-scripts.yml').read_text())
+    step = next(s for s in workflow['jobs']['windows-uninstall']['steps']
+                if s.get('name') == 'Test bin/ci contracts on Windows')
+    assert step.get('shell') == 'bash'
+    script = '''python() {
+  case "$*" in *unittest*) return 7 ;; esac
+  echo sync-must-not-run
+}
+''' + step['run']
+    bash = runpy.run_path(str(ROOT / 'bin/ci'))['BASH']
+    result = subprocess.run([bash, '-e', '-o', 'pipefail', '-c', script],
+                            capture_output=True, text=True)
+    assert result.returncode == 7, result.stdout + result.stderr
+    assert 'sync-must-not-run' not in result.stdout
+
+
 # Merge queue runs (CUA-3856): the listing for the queue commit answers QROWS, the pull request head ROWS.
 QUEUE_MOCK = MOCK.replace("""    *'head_sha='*)""", """    *'head_sha=queue'*) printf '%s' "$QROWS" ;;
     *'head_sha='*)""")

@@ -229,7 +229,7 @@ class Sync(unittest.TestCase):
         missing = []
         for cid, wf, text in ci.all_check_refs():
             path = REPO / ".github/workflows" / wf
-            if not path.exists() or text not in path.read_text():
+            if not path.exists() or text not in path.read_text(encoding="utf-8"):
                 missing.append(f"{cid}: {wf}: {text}")
         self.assertEqual(missing, [])
 
