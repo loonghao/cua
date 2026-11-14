@@ -120,7 +120,7 @@ pub enum NativeOwnershipMethod {
 }
 
 /// Explicit proof that a native window is owned by a specific process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeOwnershipProof {
     pub method: NativeOwnershipMethod,
     /// Pid the OS attributes the window to. Core refuses when this does
@@ -130,7 +130,7 @@ pub struct NativeOwnershipProof {
 }
 
 /// Native window metadata used for exact CDP-window correlation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeWindowInfo {
     pub pid: i64,
     pub window_id: u64,

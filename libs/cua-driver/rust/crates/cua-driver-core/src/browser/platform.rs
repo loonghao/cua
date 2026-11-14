@@ -627,6 +627,10 @@ mod tests {
             "platform-linux/src/browser_platform.rs",
             &[
                 (
+                    "native_windows",
+                    "no complete native peer snapshot is supplied; ambiguous binds retain their refusal",
+                ),
+                (
                     "spawn_isolated_browser",
                     "the driver launches the isolated browser with its own credentials",
                 ),

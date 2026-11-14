@@ -86,6 +86,40 @@ impl WindowsBrowserPlatform {
             browser_cursors: Arc::new(Mutex::new(BrowserCursorTracker::default())),
         }
     }
+
+    async fn native_window_snapshot(
+        &self,
+        pid: i64,
+    ) -> Result<Vec<NativeWindowInfo>, BrowserRefusal> {
+        let pid_u32 = u32::try_from(pid).map_err(|_| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "browser process id is outside the Windows process-id range",
+            )
+        })?;
+        let windows = tokio::task::spawn_blocking(move || {
+            crate::win32::windows::try_list_windows_via_win32(Some(pid_u32))
+        })
+        .await
+        .map_err(|error| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserRouteUnavailable,
+                format!("could not complete Windows browser window enumeration: {error}"),
+            )
+        })?
+        .map_err(|error| {
+            BrowserRefusal::new(
+                BrowserRefusalCode::BrowserRouteUnavailable,
+                format!("could not enumerate Windows browser windows: {error}"),
+            )
+        })?;
+        let mut snapshot = Vec::with_capacity(windows.len());
+        for window in windows {
+            snapshot.push(self.native_window(pid, window.hwnd).await?);
+        }
+        snapshot.sort_unstable_by_key(|window| window.window_id);
+        Ok(snapshot)
+    }
 }
 
 impl Default for WindowsBrowserPlatform {
@@ -988,7 +1022,7 @@ fn canonical_process_executable(path: String) -> String {
         .unwrap_or(path)
 }
 
-fn cdp_comparable_window_bounds(window_id: u64) -> Result<Rect, BrowserRefusal> {
+fn cdp_comparable_window_bounds(window_id: u64) -> Result<(Rect, bool), BrowserRefusal> {
     let hwnd = HWND(window_id as *mut _);
     let mut outer = RECT::default();
     unsafe { GetWindowRect(hwnd, &mut outer) }.map_err(|error| {
@@ -1015,7 +1049,7 @@ fn cdp_comparable_window_bounds(window_id: u64) -> Result<Rect, BrowserRefusal> 
     if let Some(bounds) =
         window_display.and_then(|index| physical_window_to_chromium_dip(physical, &displays, index))
     {
-        return Ok(bounds);
+        return Ok((bounds, true));
     }
     // Fallback (display layout unavailable or not edge-connected to the
     // primary): scale absolute coordinates by the window DPI. Exact on the
@@ -1023,11 +1057,14 @@ fn cdp_comparable_window_bounds(window_id: u64) -> Result<Rect, BrowserRefusal> 
     // Chromium DIP origin.
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     let scale = if dpi == 0 { 1.0 } else { f64::from(dpi) / 96.0 };
-    Ok(Rect::new(
-        f64::from(physical.0) / scale,
-        f64::from(physical.1) / scale,
-        f64::from(physical.2) / scale,
-        f64::from(physical.3) / scale,
+    Ok((
+        Rect::new(
+            f64::from(physical.0) / scale,
+            f64::from(physical.1) / scale,
+            f64::from(physical.2) / scale,
+            f64::from(physical.3) / scale,
+        ),
+        false,
     ))
 }
 
@@ -2201,19 +2238,30 @@ impl BrowserPlatform for WindowsBrowserPlatform {
         // including the invisible resize border. General window enumeration
         // intentionally uses DWM's visible frame instead, so obtain the
         // correlation geometry directly from GetWindowRect here.
-        let bounds = cdp_comparable_window_bounds(window_id)?;
+        let (bounds, geometry_exact) = cdp_comparable_window_bounds(window_id)?;
         Ok(NativeWindowInfo {
             pid,
             window_id,
             title: window.title,
             bounds,
-            geometry_exact: true,
+            geometry_exact,
             ownership: NativeOwnershipProof {
                 method: NativeOwnershipMethod::WindowServerOwner,
                 owner_pid: pid,
                 detail: Some("GetWindowThreadProcessId".to_owned()),
             },
         })
+    }
+
+    async fn native_windows(
+        &self,
+        pid: i64,
+    ) -> Result<Option<Vec<NativeWindowInfo>>, BrowserRefusal> {
+        let before = self.native_window_snapshot(pid).await?;
+        let after = self.native_window_snapshot(pid).await?;
+        // Win32 enumerates HWNDs sequentially; changing peer evidence cannot
+        // establish the complete native/CDP assignment used by core.
+        Ok((before == after).then_some(after))
     }
 
     async fn is_only_exact_native_window(
