@@ -61,7 +61,9 @@ jobs:
       - name: Compile Windows adapter without desktop execution
         if: runner.os == 'Windows'
         working-directory: libs/cua-driver/rust
-        run: cargo check --locked -p platform-windows --all-targets
+        run: |
+          cargo check --locked -p platform-windows --all-targets
+          cargo test --locked -p platform-windows --lib
       - name: Compile macOS adapter without desktop execution
         if: runner.os == 'macOS'
         working-directory: libs/cua-driver/rust

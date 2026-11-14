@@ -1109,7 +1109,7 @@ fn physical_displays() -> Vec<PhysicalDisplay> {
             let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
             let scale = match GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) {
                 Ok(()) if dpi_x != 0 => f64::from(dpi_x) / 96.0,
-                _ => 1.0,
+                _ => 0.0,
             };
             displays.push(PhysicalDisplay {
                 left: rect.left,
@@ -1124,13 +1124,17 @@ fn physical_displays() -> Vec<PhysicalDisplay> {
     }
 
     let mut displays: Vec<PhysicalDisplay> = Vec::new();
-    unsafe {
-        let _ = EnumDisplayMonitors(
+    if !unsafe {
+        EnumDisplayMonitors(
             HDC::default(),
             None,
             Some(collect),
             LPARAM(&mut displays as *mut Vec<PhysicalDisplay> as isize),
-        );
+        )
+    }
+    .as_bool()
+    {
+        return Vec::new();
     }
     displays
 }
@@ -1172,6 +1176,12 @@ fn shared_edge(parent: &PhysicalDisplay, child: &PhysicalDisplay) -> Option<Disp
 /// edge-connected to the primary display.
 fn chromium_dip_origins(displays: &[PhysicalDisplay]) -> Vec<Option<(f64, f64)>> {
     let mut origins: Vec<Option<(f64, f64)>> = vec![None; displays.len()];
+    if displays
+        .iter()
+        .any(|display| !display.scale.is_finite() || display.scale <= 0.0)
+    {
+        return origins;
+    }
     let Some(primary) = displays.iter().position(|display| display.primary) else {
         return origins;
     };
@@ -2759,6 +2769,19 @@ mod tests {
             display.primary = false;
         }
         assert!(chromium_dip_origins(&displays).iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn chromium_dip_layout_requires_known_scale_for_every_monitor() {
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut displays = issue_4428_displays();
+            displays[1].scale = scale;
+            for index in 0..displays.len() {
+                assert!(
+                    physical_window_to_chromium_dip((0, 0, 800, 600), &displays, index).is_none()
+                );
+            }
+        }
     }
 
     #[test]
