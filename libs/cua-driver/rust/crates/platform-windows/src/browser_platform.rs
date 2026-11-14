@@ -1105,21 +1105,22 @@ fn physical_displays() -> Vec<PhysicalDisplay> {
         data: LPARAM,
     ) -> BOOL {
         let displays = &mut *(data.0 as *mut Vec<PhysicalDisplay>);
-        if let Some((rect, primary)) = monitor_info(monitor) {
-            let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
-            let scale = match GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) {
-                Ok(()) if dpi_x != 0 => f64::from(dpi_x) / 96.0,
-                _ => 0.0,
-            };
-            displays.push(PhysicalDisplay {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
-                scale,
-                primary,
-            });
-        }
+        let Some((rect, primary)) = monitor_info(monitor) else {
+            return BOOL(0);
+        };
+        let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
+        let scale = match GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) {
+            Ok(()) if dpi_x != 0 => f64::from(dpi_x) / 96.0,
+            _ => return BOOL(0),
+        };
+        displays.push(PhysicalDisplay {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            scale,
+            primary,
+        });
         BOOL(1)
     }
 
