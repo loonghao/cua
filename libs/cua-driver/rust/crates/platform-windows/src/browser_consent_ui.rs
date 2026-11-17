@@ -123,6 +123,20 @@ impl Drop for ConsentNodes {
     }
 }
 
+fn read_consent_nodes(hwnd: u64) -> Result<ConsentNodes, BrowserRefusal> {
+    // Consent belongs to native chrome. A whole-window cache also asks the
+    // active renderer for its document and can exhaust the consent deadline
+    // before the independently responsive native buttons are inspected.
+    crate::uia::walk_native_tree_complete(hwnd)
+        .map(ConsentNodes)
+        .map_err(|error| {
+            refusal(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                format!("the complete native Chromium consent tree was unavailable: {error}"),
+            )
+        })
+}
+
 fn is_in_web_content(nodes: &[UiaNode], node: &UiaNode) -> bool {
     let mut parent = node.parent_element_index;
     for _ in 0..nodes.len() {
@@ -236,10 +250,6 @@ fn native_prompt_surfaces(nodes: &[UiaNode]) -> Vec<(usize, usize)> {
             }
         })
         .collect()
-}
-
-fn native_prompt_surface_present(nodes: &[UiaNode]) -> bool {
-    !native_prompt_surfaces(nodes).is_empty()
 }
 
 fn native_button_properties(element_ptr: usize) -> Result<(String, bool), BrowserRefusal> {
@@ -386,19 +396,29 @@ where
     let mut matches = Vec::new();
     for (start, end) in surfaces {
         let mut candidates = Vec::new();
+        let mut has_dialog_button = false;
+        let mut has_other_native_button = false;
         for node in nodes[(start + 1)..end].iter().filter(|node| {
             is_trusted_prompt_node(nodes, node)
                 && node.control_type == "Button"
-                && node.actions.iter().any(|action| action == "invoke")
-                && node.enabled != Some(false)
                 && node.element_ptr != 0
-                && node.rect.is_some()
         }) {
             let (class_name, has_keyboard_focus) = properties(node.element_ptr)?;
             if class_name != CHROMIUM_DIALOG_BUTTON_CLASS {
+                has_other_native_button = true;
                 continue;
             }
-            let rect = node.rect.expect("filtered above");
+            // Title-bound native surfaces also include translation bubbles.
+            // Only the dialog-control class makes one a consent candidate;
+            // once present, incomplete or disabled consent still fails closed.
+            has_dialog_button = true;
+            if !node.actions.iter().any(|action| action == "invoke") || node.enabled == Some(false)
+            {
+                continue;
+            }
+            let Some(rect) = node.rect else {
+                continue;
+            };
             if rect.0 >= rect.2 || rect.1 >= rect.3 {
                 continue;
             }
@@ -413,6 +433,9 @@ where
                 rect,
                 has_keyboard_focus,
             });
+        }
+        if !has_dialog_button && has_other_native_button {
+            continue;
         }
         let (allow, cancel) = select_language_independent_actions(&candidates)?;
         let rect_of = |ptr: usize| {
@@ -565,13 +588,28 @@ struct ExactAllowButton {
     additional_nodes: ConsentNodes,
 }
 
+type ConsentInspection = (ConsentNodes, bool, Option<ExactAllowButton>);
+
+fn inspect_owned_or_inline_with<F>(
+    owned: Result<Option<ExactAllowButton>, BrowserRefusal>,
+    inline: F,
+) -> Result<ConsentInspection, BrowserRefusal>
+where
+    F: FnOnce() -> Result<ConsentInspection, BrowserRefusal>,
+{
+    match owned? {
+        Some(selection) => Ok((ConsentNodes(Vec::new()), true, Some(selection))),
+        None => inline(),
+    }
+}
+
 fn exact_allow_button_from_owned_prompt_windows(
     target_pid: u32,
     target_hwnd: u64,
-) -> Result<ExactAllowButton, BrowserRefusal> {
+) -> Result<Option<ExactAllowButton>, BrowserRefusal> {
     let mut candidates = Vec::new();
     for (prompt_hwnd, z_order_rank) in target_owned_windows_by_z_order(target_pid, target_hwnd) {
-        let tree = ConsentNodes(crate::uia::walk_tree(prompt_hwnd, None).nodes);
+        let tree = read_consent_nodes(prompt_hwnd)?;
         if let Some(element_ptr) = exact_allow_button_with(&tree.0, native_button_properties)? {
             candidates.push((
                 native_consent_action_evidence(
@@ -590,6 +628,9 @@ fn exact_allow_button_from_owned_prompt_windows(
         .iter()
         .map(|(evidence, _)| *evidence)
         .collect::<Vec<_>>();
+    if evidence.is_empty() {
+        return Ok(None);
+    }
     let selected = select_unique_target_owned_topmost(&evidence)?;
 
     let mut selected_nodes: Option<ConsentNodes> = None;
@@ -604,19 +645,18 @@ fn exact_allow_button_from_owned_prompt_windows(
             selected_nodes = Some(nodes);
         }
     }
-    Ok(ExactAllowButton {
+    Ok(Some(ExactAllowButton {
         element_ptr: selected,
         additional_nodes: selected_nodes.expect("selected evidence retains its exact UIA tree"),
-    })
+    }))
 }
 
 fn exact_allow_button_for_target(
-    nodes: &[UiaNode],
+    actions: &[usize],
     target_pid: u32,
     target_hwnd: u64,
 ) -> Result<Option<ExactAllowButton>, BrowserRefusal> {
-    let actions = structural_allow_actions_with(nodes, native_button_properties)?;
-    match actions.as_slice() {
+    match actions {
         [] => return Ok(None),
         [element_ptr] => {
             return Ok(Some(ExactAllowButton {
@@ -626,7 +666,45 @@ fn exact_allow_button_for_target(
         }
         _ => {}
     }
-    exact_allow_button_from_owned_prompt_windows(target_pid, target_hwnd).map(Some)
+    exact_allow_button_from_owned_prompt_windows(target_pid, target_hwnd)?
+        .map(Some)
+        .ok_or_else(|| {
+            refusal(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "multiple inline Chromium consent actions lacked unique target-owned window proof",
+            )
+        })
+}
+
+fn inline_consent_inspection_with<F>(
+    nodes: &[UiaNode],
+    properties: F,
+    target_pid: u32,
+    target_hwnd: u64,
+) -> Result<(bool, Option<ExactAllowButton>), BrowserRefusal>
+where
+    F: FnMut(usize) -> Result<(String, bool), BrowserRefusal>,
+{
+    let actions = structural_allow_actions_with(nodes, properties)?;
+    // Presence and selection must share the same consent classification.
+    // A title-bound unrelated bubble must never arm the revocation guard.
+    let prompt_present = !actions.is_empty();
+    let selection = exact_allow_button_for_target(&actions, target_pid, target_hwnd)?;
+    Ok((prompt_present, selection))
+}
+
+fn observe_prompt_presence(
+    saw_prompt: &mut bool,
+    prompt_present: bool,
+) -> Result<(), BrowserRefusal> {
+    if *saw_prompt && !prompt_present {
+        return Err(refusal(
+            BrowserRefusalCode::BrowserConsentRevoked,
+            "the person dismissed the browser consent prompt",
+        ));
+    }
+    *saw_prompt |= prompt_present;
+    Ok(())
 }
 
 unsafe fn invoke(element_ptr: usize) -> Result<(), BrowserRefusal> {
@@ -662,22 +740,16 @@ pub fn dismiss(pid: u32, hwnd: u64) -> Result<bool, BrowserRefusal> {
     let mut dismissed = false;
     loop {
         prove_window_owner(hwnd, pid)?;
-        let tree = crate::uia::walk_tree(hwnd, None);
-        let prompt_present = native_prompt_surface_present(&tree.nodes);
-        if !prompt_present {
-            release_nodes(&tree.nodes);
-            return Ok(dismissed);
-        }
-        let cancel = exact_cancel_button(&tree.nodes);
+        let tree = read_consent_nodes(hwnd)?;
+        let cancel = exact_cancel_button(&tree.0);
         let invoked = match cancel {
             Ok(Some(element)) => unsafe { invoke(element) },
-            Ok(None) => Err(BrowserRefusal::new(
-                BrowserRefusalCode::BrowserWrongTargetRefused,
-                "the exact remote-debugging consent prompt exposed no structural cancel action",
-            )),
+            Ok(None) => {
+                return Ok(dismissed);
+            }
             Err(error) => Err(error),
         };
-        release_nodes(&tree.nodes);
+        drop(tree);
         invoked?;
         dismissed = true;
         if Instant::now() >= deadline {
@@ -719,15 +791,27 @@ pub async fn handle(
         prove_window_owner(request.window_id, pid)?;
         let hwnd = request.window_id;
         let (tree, prompt_present, selection) = inspect_consent_blocking(move || {
-            let tree = ConsentNodes(crate::uia::walk_tree(hwnd, None).nodes);
-            let prompt_present = native_prompt_surface_present(&tree.0);
-            let selection = exact_allow_button_for_target(&tree.0, pid, hwnd);
-            (tree, prompt_present, selection)
+            // A browser-owned modal is independently observable even when the
+            // main window's renderer or native toolbar is slow. Prove its owner
+            // and unique topmost action before considering an inline prompt.
+            inspect_owned_or_inline_with(
+                exact_allow_button_from_owned_prompt_windows(pid, hwnd),
+                || {
+                    let tree = read_consent_nodes(hwnd)?;
+                    let (prompt_present, selection) = inline_consent_inspection_with(
+                        &tree.0,
+                        native_button_properties,
+                        pid,
+                        hwnd,
+                    )?;
+                    Ok((tree, prompt_present, selection))
+                },
+            )
         })
-        .await?;
-        saw_prompt |= prompt_present;
+        .await??;
+        observe_prompt_presence(&mut saw_prompt, prompt_present)?;
         match selection {
-            Ok(Some(selection)) => {
+            Some(selection) => {
                 let invoked = request
                     .action
                     .perform(|| unsafe { invoke(selection.element_ptr) });
@@ -736,17 +820,7 @@ pub async fn handle(
                 invoked?;
                 return Ok(BrowserConsentOutcome::Accepted);
             }
-            Ok(None) => drop(tree),
-            Err(error) => {
-                drop(tree);
-                return Err(error);
-            }
-        }
-        if saw_prompt && !prompt_present {
-            return Err(BrowserRefusal::new(
-                BrowserRefusalCode::BrowserConsentRevoked,
-                "the person dismissed the browser consent prompt",
-            ));
+            None => drop(tree),
         }
         if Instant::now() >= deadline {
             return Err(BrowserRefusal::new(
@@ -764,6 +838,66 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unrelated_bubble_disappearance_does_not_revoke_a_later_consent_prompt() {
+        let mut saw_prompt = false;
+        let mut selected = None;
+        for nodes in [
+            unrelated_native_bubble("\u{2067}opaque bubble\u{2069}"),
+            Vec::new(),
+            prompt("\u{2067}العربية\u{2069}", ["👩🏽‍💻", "é", "e\u{301}"]),
+        ] {
+            let (present, selection) =
+                inline_consent_inspection_with(&nodes, |ptr| bubble_properties(ptr, true), 42, 100)
+                    .unwrap();
+            observe_prompt_presence(&mut saw_prompt, present)
+                .expect("an unrelated bubble must not start or revoke the consent wait");
+            selected = selection;
+        }
+        assert!(saw_prompt);
+        assert_eq!(selected.unwrap().element_ptr, 12);
+        assert_eq!(
+            observe_prompt_presence(&mut saw_prompt, false)
+                .unwrap_err()
+                .code,
+            BrowserRefusalCode::BrowserConsentRevoked
+        );
+    }
+
+    #[test]
+    fn owned_consent_does_not_read_an_unresponsive_main_window() {
+        let selection = ExactAllowButton {
+            element_ptr: 42,
+            additional_nodes: ConsentNodes(Vec::new()),
+        };
+        let (_, present, selected) = inspect_owned_or_inline_with(Ok(Some(selection)), || {
+            panic!("the unrelated main-window provider must not be queried")
+        })
+        .unwrap();
+        assert!(present);
+        assert_eq!(selected.unwrap().element_ptr, 42);
+    }
+
+    #[test]
+    fn owned_consent_absence_uses_inline_inspection_but_ambiguity_never_does() {
+        let (_, present, selected) =
+            inspect_owned_or_inline_with(Ok(None), || Ok((ConsentNodes(Vec::new()), false, None)))
+                .unwrap();
+        assert!(!present);
+        assert!(selected.is_none());
+        let result = inspect_owned_or_inline_with(
+            Err(refusal(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "ambiguous owned modal",
+            )),
+            || panic!("an ambiguous owned modal must not fall back"),
+        );
+        assert_eq!(
+            result.err().unwrap().code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn consent_inspection_does_not_block_the_async_executor() {
@@ -866,6 +1000,112 @@ mod tests {
 
     fn properties(element_ptr: usize) -> Result<(String, bool), BrowserRefusal> {
         Ok((CHROMIUM_DIALOG_BUTTON_CLASS.to_owned(), element_ptr == 13))
+    }
+
+    fn unrelated_native_bubble(title: &str) -> Vec<UiaNode> {
+        vec![
+            dialog_node("Pane", title, 2),
+            dialog_node("Text", title, 3),
+            button("opaque icon", 101, (400, 400, 430, 430)),
+            button("opaque icon", 102, (440, 400, 470, 430)),
+            button("opaque action", 103, (400, 440, 470, 470)),
+        ]
+    }
+
+    fn bubble_properties(
+        element_ptr: usize,
+        focused: bool,
+    ) -> Result<(String, bool), BrowserRefusal> {
+        let class = match element_ptr {
+            101 | 102 => "ImageButton",
+            103 => "HoverButton",
+            _ => CHROMIUM_DIALOG_BUTTON_CLASS,
+        };
+        Ok((class.to_owned(), focused && element_ptr == 13))
+    }
+
+    #[test]
+    fn consent_ignores_unrelated_native_bubbles_in_either_walk_order() {
+        for (title, labels) in [
+            ("e\u{301}", ["é", "E\u{301}", "ë"]),
+            ("日本語", ["हिन्दी", "ไทย", "한국어"]),
+            ("\u{2067}العربية\u{2069}", ["עברית", "👩🏽‍💻", "A\u{200d}B"]),
+        ] {
+            for bubble_first in [false, true] {
+                for focused in [false, true] {
+                    for mirrored in [false, true] {
+                        let mut consent = prompt(title, labels);
+                        if mirrored {
+                            for node in &mut consent {
+                                node.rect = node.rect.map(|(l, t, r, b)| (-r, t, -l, b));
+                            }
+                        }
+                        let bubble = unrelated_native_bubble("opaque unrelated title");
+                        let nodes = if bubble_first {
+                            [bubble, consent].concat()
+                        } else {
+                            [consent, bubble].concat()
+                        };
+                        assert_eq!(
+                            exact_allow_button_with(&nodes, |ptr| bubble_properties(ptr, focused))
+                                .unwrap(),
+                            Some(12)
+                        );
+                        assert_eq!(
+                            exact_cancel_button_with(&nodes, |ptr| bubble_properties(ptr, focused))
+                                .unwrap(),
+                            Some(13)
+                        );
+                    }
+                }
+            }
+        }
+        let bubble = unrelated_native_bubble("opaque unrelated title");
+        assert_eq!(
+            exact_allow_button_with(&bubble, |p| bubble_properties(p, false)).unwrap(),
+            None
+        );
+        assert_eq!(
+            exact_cancel_button_with(&bubble, |p| bubble_properties(p, false)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn unrelated_bubbles_do_not_hide_malformed_or_renderer_consent() {
+        for enabled_count in 0..3 {
+            let mut malformed = prompt("incomplete native consent", ["A", "B", "C"]);
+            for (index, node) in malformed[3..].iter_mut().enumerate() {
+                node.element_ptr += 200;
+                node.element_index = Some(node.element_ptr);
+                node.enabled = Some(index < enabled_count);
+            }
+            let mut nodes = prompt("valid native consent", ["D", "E", "F"]);
+            nodes.extend(unrelated_native_bubble("opaque unrelated title"));
+            nodes.extend(malformed);
+            for result in [
+                exact_allow_button_with(&nodes, |p| bubble_properties(p, true)),
+                exact_cancel_button_with(&nodes, |p| bubble_properties(p, true)),
+            ] {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    BrowserRefusalCode::BrowserWrongTargetRefused
+                );
+            }
+        }
+        let mut spoof = prompt("renderer title", ["A", "B", "C"]);
+        for node in &mut spoof {
+            node.in_web_content = true;
+        }
+        spoof.extend(unrelated_native_bubble("opaque unrelated title"));
+        assert_eq!(
+            exact_allow_button_with(&spoof, |p| bubble_properties(p, false)).unwrap(),
+            None
+        );
+        assert_eq!(
+            exact_cancel_button_with(&spoof, |p| bubble_properties(p, false)).unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
