@@ -123,6 +123,20 @@ impl Drop for ConsentNodes {
     }
 }
 
+fn read_consent_nodes(hwnd: u64) -> Result<ConsentNodes, BrowserRefusal> {
+    // Consent belongs to native chrome. A whole-window cache also asks the
+    // active renderer for its document and can exhaust the consent deadline
+    // before the independently responsive native buttons are inspected.
+    crate::uia::walk_native_tree_complete(hwnd)
+        .map(ConsentNodes)
+        .map_err(|error| {
+            refusal(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                format!("the complete native Chromium consent tree was unavailable: {error}"),
+            )
+        })
+}
+
 fn is_in_web_content(nodes: &[UiaNode], node: &UiaNode) -> bool {
     let mut parent = node.parent_element_index;
     for _ in 0..nodes.len() {
@@ -584,7 +598,7 @@ fn exact_allow_button_from_owned_prompt_windows(
 ) -> Result<ExactAllowButton, BrowserRefusal> {
     let mut candidates = Vec::new();
     for (prompt_hwnd, z_order_rank) in target_owned_windows_by_z_order(target_pid, target_hwnd) {
-        let tree = ConsentNodes(crate::uia::walk_tree(prompt_hwnd, None).nodes);
+        let tree = read_consent_nodes(prompt_hwnd)?;
         if let Some(element_ptr) = exact_allow_button_with(&tree.0, native_button_properties)? {
             candidates.push((
                 native_consent_action_evidence(
@@ -675,22 +689,20 @@ pub fn dismiss(pid: u32, hwnd: u64) -> Result<bool, BrowserRefusal> {
     let mut dismissed = false;
     loop {
         prove_window_owner(hwnd, pid)?;
-        let tree = crate::uia::walk_tree(hwnd, None);
-        let prompt_present = native_prompt_surface_present(&tree.nodes);
+        let tree = read_consent_nodes(hwnd)?;
+        let prompt_present = native_prompt_surface_present(&tree.0);
         if !prompt_present {
-            release_nodes(&tree.nodes);
             return Ok(dismissed);
         }
-        let cancel = exact_cancel_button(&tree.nodes);
+        let cancel = exact_cancel_button(&tree.0);
         let invoked = match cancel {
             Ok(Some(element)) => unsafe { invoke(element) },
             Ok(None) => {
-                release_nodes(&tree.nodes);
                 return Ok(dismissed);
             }
             Err(error) => Err(error),
         };
-        release_nodes(&tree.nodes);
+        drop(tree);
         invoked?;
         dismissed = true;
         if Instant::now() >= deadline {
@@ -732,12 +744,12 @@ pub async fn handle(
         prove_window_owner(request.window_id, pid)?;
         let hwnd = request.window_id;
         let (tree, prompt_present, selection) = inspect_consent_blocking(move || {
-            let tree = ConsentNodes(crate::uia::walk_tree(hwnd, None).nodes);
+            let tree = read_consent_nodes(hwnd)?;
             let prompt_present = native_prompt_surface_present(&tree.0);
             let selection = exact_allow_button_for_target(&tree.0, pid, hwnd);
-            (tree, prompt_present, selection)
+            Ok::<_, BrowserRefusal>((tree, prompt_present, selection))
         })
-        .await?;
+        .await??;
         saw_prompt |= prompt_present;
         match selection {
             Ok(Some(selection)) => {
