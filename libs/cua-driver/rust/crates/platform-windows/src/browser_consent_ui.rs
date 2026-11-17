@@ -592,10 +592,25 @@ struct ExactAllowButton {
     additional_nodes: ConsentNodes,
 }
 
+type ConsentInspection = (ConsentNodes, bool, Option<ExactAllowButton>);
+
+fn inspect_owned_or_inline_with<F>(
+    owned: Result<Option<ExactAllowButton>, BrowserRefusal>,
+    inline: F,
+) -> Result<ConsentInspection, BrowserRefusal>
+where
+    F: FnOnce() -> Result<ConsentInspection, BrowserRefusal>,
+{
+    match owned? {
+        Some(selection) => Ok((ConsentNodes(Vec::new()), true, Some(selection))),
+        None => inline(),
+    }
+}
+
 fn exact_allow_button_from_owned_prompt_windows(
     target_pid: u32,
     target_hwnd: u64,
-) -> Result<ExactAllowButton, BrowserRefusal> {
+) -> Result<Option<ExactAllowButton>, BrowserRefusal> {
     let mut candidates = Vec::new();
     for (prompt_hwnd, z_order_rank) in target_owned_windows_by_z_order(target_pid, target_hwnd) {
         let tree = read_consent_nodes(prompt_hwnd)?;
@@ -617,6 +632,9 @@ fn exact_allow_button_from_owned_prompt_windows(
         .iter()
         .map(|(evidence, _)| *evidence)
         .collect::<Vec<_>>();
+    if evidence.is_empty() {
+        return Ok(None);
+    }
     let selected = select_unique_target_owned_topmost(&evidence)?;
 
     let mut selected_nodes: Option<ConsentNodes> = None;
@@ -631,10 +649,10 @@ fn exact_allow_button_from_owned_prompt_windows(
             selected_nodes = Some(nodes);
         }
     }
-    Ok(ExactAllowButton {
+    Ok(Some(ExactAllowButton {
         element_ptr: selected,
         additional_nodes: selected_nodes.expect("selected evidence retains its exact UIA tree"),
-    })
+    }))
 }
 
 fn exact_allow_button_for_target(
@@ -653,7 +671,14 @@ fn exact_allow_button_for_target(
         }
         _ => {}
     }
-    exact_allow_button_from_owned_prompt_windows(target_pid, target_hwnd).map(Some)
+    exact_allow_button_from_owned_prompt_windows(target_pid, target_hwnd)?
+        .map(Some)
+        .ok_or_else(|| {
+            refusal(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "multiple inline Chromium consent actions lacked unique target-owned window proof",
+            )
+        })
 }
 
 unsafe fn invoke(element_ptr: usize) -> Result<(), BrowserRefusal> {
@@ -744,15 +769,23 @@ pub async fn handle(
         prove_window_owner(request.window_id, pid)?;
         let hwnd = request.window_id;
         let (tree, prompt_present, selection) = inspect_consent_blocking(move || {
-            let tree = read_consent_nodes(hwnd)?;
-            let prompt_present = native_prompt_surface_present(&tree.0);
-            let selection = exact_allow_button_for_target(&tree.0, pid, hwnd);
-            Ok::<_, BrowserRefusal>((tree, prompt_present, selection))
+            // A browser-owned modal is independently observable even when the
+            // main window's renderer or native toolbar is slow. Prove its owner
+            // and unique topmost action before considering an inline prompt.
+            inspect_owned_or_inline_with(
+                exact_allow_button_from_owned_prompt_windows(pid, hwnd),
+                || {
+                    let tree = read_consent_nodes(hwnd)?;
+                    let prompt_present = native_prompt_surface_present(&tree.0);
+                    let selection = exact_allow_button_for_target(&tree.0, pid, hwnd)?;
+                    Ok((tree, prompt_present, selection))
+                },
+            )
         })
         .await??;
         saw_prompt |= prompt_present;
         match selection {
-            Ok(Some(selection)) => {
+            Some(selection) => {
                 let invoked = request
                     .action
                     .perform(|| unsafe { invoke(selection.element_ptr) });
@@ -761,11 +794,7 @@ pub async fn handle(
                 invoked?;
                 return Ok(BrowserConsentOutcome::Accepted);
             }
-            Ok(None) => drop(tree),
-            Err(error) => {
-                drop(tree);
-                return Err(error);
-            }
+            None => drop(tree),
         }
         if saw_prompt && !prompt_present {
             return Err(BrowserRefusal::new(
@@ -789,6 +818,40 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_consent_does_not_read_an_unresponsive_main_window() {
+        let selection = ExactAllowButton {
+            element_ptr: 42,
+            additional_nodes: ConsentNodes(Vec::new()),
+        };
+        let (_, present, selected) = inspect_owned_or_inline_with(Ok(Some(selection)), || {
+            panic!("the unrelated main-window provider must not be queried")
+        })
+        .unwrap();
+        assert!(present);
+        assert_eq!(selected.unwrap().element_ptr, 42);
+    }
+
+    #[test]
+    fn owned_consent_absence_uses_inline_inspection_but_ambiguity_never_does() {
+        let (_, present, selected) =
+            inspect_owned_or_inline_with(Ok(None), || Ok((ConsentNodes(Vec::new()), false, None)))
+                .unwrap();
+        assert!(!present);
+        assert!(selected.is_none());
+        let result = inspect_owned_or_inline_with(
+            Err(refusal(
+                BrowserRefusalCode::BrowserWrongTargetRefused,
+                "ambiguous owned modal",
+            )),
+            || panic!("an ambiguous owned modal must not fall back"),
+        );
+        assert_eq!(
+            result.err().unwrap().code,
+            BrowserRefusalCode::BrowserWrongTargetRefused
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn consent_inspection_does_not_block_the_async_executor() {
