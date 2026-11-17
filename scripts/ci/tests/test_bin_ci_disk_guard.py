@@ -59,7 +59,9 @@ class Guard(unittest.TestCase):
     def test_trip_kills_running_process(self):
         with tempfile.TemporaryDirectory() as d:
             guard = ci.DiskGuard(Path(d), interval=3600)
-            proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+            self.addCleanup(proc.wait, timeout=10)
+            self.addCleanup(proc.kill)
             guard.register(proc)
             with mock.patch.dict(os.environ, {"CUA_CI_FAKE_FREE_GB": "10"}):
                 reason = guard.check_once()
@@ -71,7 +73,7 @@ class Guard(unittest.TestCase):
     def test_no_trip_leaves_process(self):
         with tempfile.TemporaryDirectory() as d:
             guard = ci.DiskGuard(Path(d), interval=3600)
-            proc = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
             guard.register(proc)
             try:
                 with mock.patch.dict(os.environ, {"CUA_CI_FAKE_FREE_GB": "500"}):

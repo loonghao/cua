@@ -13,11 +13,13 @@ many open files" on such a Mac, for no code reason (seen on a CI Mac, 10 Nov 202
 from __future__ import annotations
 
 import re
-import resource
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+
+if sys.platform != "win32":
+    import resource
 
 ROOT = Path(__file__).resolve().parents[3]
 MARKER = "# nofile-limit"

@@ -1,7 +1,9 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
+import sys
 
 import pytest
 import yaml
@@ -464,6 +466,100 @@ def test_quick_stage_runs_once_per_commit():
         assert step['if'] == "steps.marker.outputs.cache-hit != 'true'", step.get('name', step.get('uses'))
     assert steps[-1] is save
     assert any('bin/ci --quick' in str(s.get('run', '')) for s in middle)
+
+
+@pytest.fixture
+def quick_comparison(tmp_path):
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=tmp_path, text=True,
+                              capture_output=True, check=True).stdout.strip()
+
+    git('init', '-q')
+    git('config', 'user.name', 'CI test')
+    git('config', 'user.email', 'ci@example.test')
+    git('config', 'commit.gpgsign', 'false')
+    git('config', 'core.hooksPath', str(tmp_path / 'no-hooks'))
+    (tmp_path / 'README.md').write_text('main\n')
+    git('add', '.')
+    git('commit', '-qm', 'main')
+    main = git('rev-parse', 'HEAD')
+    git('update-ref', 'refs/remotes/origin/main', main)
+    app = tmp_path / 'apps/cua-spaces-web/src/compat.tsx'
+    app.parent.mkdir(parents=True)
+    app.write_text('export const compat = true;\n')
+    git('add', '.')
+    git('commit', '-qm', 'compatibility branch')
+    maintenance = git('rev-parse', 'HEAD')
+    (tmp_path / 'fix.txt').write_text('pull request\n')
+    git('add', '.')
+    git('commit', '-qm', 'pull request')
+    unrelated = git('commit-tree', 'HEAD^{tree}', '-m', 'unrelated root')
+    for workspace in ('libs/cua', 'libs/cua-spacesd', 'libs/cua-driver/rust'):
+        (tmp_path / workspace).mkdir(parents=True)
+    quick = yaml.safe_load((WORKFLOWS / 'ci-quick.yml').read_text())['jobs']['quick']
+    steps = {step.get('name'): step for step in quick['steps']}
+    script = '''python3() {
+  shift
+  "$QUICK_TEST_PYTHON" "$QUICK_TEST_CI" "$@" --list | tee -a "$QUICK_TEST_PLANS"
+}
+go() { return 91; }
+''' + steps['Install crane (only when the docs image refs are checked)']['run'] + '\n' + steps['bin/ci --quick']['run']
+    bash = runpy.run_path(str(ROOT / 'bin/ci'))['BASH']
+
+    def run(base):
+        plans = tmp_path / 'plans.log'
+        # Keep the journal outside the fixture's Git change set.
+        git('config', 'core.excludesFile', str(tmp_path / 'ignore'))
+        (tmp_path / 'ignore').write_text('plans.log\nignore\n')
+        result = subprocess.run([bash, '-e', '-o', 'pipefail', '-c', script],
+                                cwd=tmp_path, capture_output=True, text=True,
+                                env={**os.environ, 'BASE_SHA': base, 'CUA_CI_ROOT': str(tmp_path),
+                                     'QUICK_TEST_PYTHON': Path(sys.executable).as_posix(),
+                                     'QUICK_TEST_CI': (ROOT / 'bin/ci').as_posix(),
+                                     'QUICK_TEST_PLANS': plans.name})
+        return result, plans.read_text() if plans.exists() else ''
+
+    return quick, main, maintenance, unrelated, run
+
+
+def test_quick_binds_both_events_to_their_actual_base(quick_comparison):
+    quick, *_ = quick_comparison
+    assert quick['env']['BASE_SHA'] == '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
+
+
+@pytest.mark.parametrize('target', ['maintenance', 'main'])
+def test_quick_plans_and_runs_the_complete_target_branch_diff(quick_comparison, target):
+    _, main, maintenance, _, run = quick_comparison
+    result, plans = run(maintenance if target == 'maintenance' else main)
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = 1 if target == 'maintenance' else 2
+    assert plans.count(f'{expected} changed file(s)') == 2, plans
+    assert ('spaces-prettier' in plans) == (target == 'main'), plans
+
+
+@pytest.mark.parametrize('invalid', ['', '0' * 40, 'unrelated'])
+def test_quick_refuses_missing_unknown_or_unrelated_base(quick_comparison, invalid):
+    _, _, _, unrelated, run = quick_comparison
+    result, plans = run(unrelated if invalid == 'unrelated' else invalid)
+    assert result.returncode == (1 if invalid == 'unrelated' else 128), result.stdout + result.stderr
+    assert plans == '', plans
+
+
+def test_windows_selftest_failure_stops_before_sync():
+    workflow = yaml.safe_load((WORKFLOWS / 'ci-test-scripts.yml').read_text())
+    step = next(s for s in workflow['jobs']['windows-uninstall']['steps']
+                if s.get('name') == 'Test bin/ci contracts on Windows')
+    assert step.get('shell') == 'bash'
+    script = '''python() {
+  case "$*" in *unittest*) return 7 ;; esac
+  echo sync-must-not-run
+}
+''' + step['run']
+    bash = runpy.run_path(str(ROOT / 'bin/ci'))['BASH']
+    result = subprocess.run([bash, '-e', '-o', 'pipefail', '-c', script],
+                            capture_output=True, text=True)
+    assert result.returncode == 7, result.stdout + result.stderr
+    assert 'sync-must-not-run' not in result.stdout
 
 
 # Merge queue runs (CUA-3856): the listing for the queue commit answers QROWS, the pull request head ROWS.

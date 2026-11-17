@@ -454,12 +454,16 @@ def test_cua_sdk_rust_tests_are_built_once_and_run_from_the_archive():
     assert not any("save-if" in s.get("with", {}) for s in build["steps"] if "rust-cache" in str(s.get("uses", "")))
 
 
-def test_cua_sdk_pool_model_checks_leave_pull_requests_but_run_on_main_and_nightly():
+def test_cua_sdk_pool_model_checks_leave_pull_requests_but_run_on_main_and_manual():
     text = (ROOT / ".github/workflows/ci-cua-sdk.yml").read_text()
     wf = load("ci-cua-sdk.yml")
-    assert "schedule" in (wf.get("on") or wf[True])
+    events = wf.get("on") or wf[True]
+    # Fork main removed daily SDK schedules in 350e169; keep full coverage on its remaining entrypoints.
+    assert "schedule" not in events
+    assert events["push"]["branches"] == ["main"]
+    assert "workflow_dispatch" in events
     run = next(s["run"] for s in wf["jobs"]["rust-linux"]["steps"] if "cargo nextest run" in s.get("run", ""))
-    # Excluded only on pull requests without `ci:full`; main, the nightly schedule and `ci:full` run them.
+    # Excluded only on pull requests without `ci:full`; main, manual runs and `ci:full` run them.
     assert "github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'ci:full')" in run
     for name in ("pool_protocol_is_safe", "mutation_no_epoch_check_breaks_single_writer", "finding_stale_holder_cancels_current_attempt"):
         assert f"test(={name})" in run
