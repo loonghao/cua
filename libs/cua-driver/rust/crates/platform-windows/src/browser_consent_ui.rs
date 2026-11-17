@@ -252,10 +252,6 @@ fn native_prompt_surfaces(nodes: &[UiaNode]) -> Vec<(usize, usize)> {
         .collect()
 }
 
-fn native_prompt_surface_present(nodes: &[UiaNode]) -> bool {
-    !native_prompt_surfaces(nodes).is_empty()
-}
-
 fn native_button_properties(element_ptr: usize) -> Result<(String, bool), BrowserRefusal> {
     let element = unsafe { IUIAutomationElement::from_raw(element_ptr as *mut _) };
     let properties = unsafe {
@@ -656,12 +652,11 @@ fn exact_allow_button_from_owned_prompt_windows(
 }
 
 fn exact_allow_button_for_target(
-    nodes: &[UiaNode],
+    actions: &[usize],
     target_pid: u32,
     target_hwnd: u64,
 ) -> Result<Option<ExactAllowButton>, BrowserRefusal> {
-    let actions = structural_allow_actions_with(nodes, native_button_properties)?;
-    match actions.as_slice() {
+    match actions {
         [] => return Ok(None),
         [element_ptr] => {
             return Ok(Some(ExactAllowButton {
@@ -679,6 +674,37 @@ fn exact_allow_button_for_target(
                 "multiple inline Chromium consent actions lacked unique target-owned window proof",
             )
         })
+}
+
+fn inline_consent_inspection_with<F>(
+    nodes: &[UiaNode],
+    properties: F,
+    target_pid: u32,
+    target_hwnd: u64,
+) -> Result<(bool, Option<ExactAllowButton>), BrowserRefusal>
+where
+    F: FnMut(usize) -> Result<(String, bool), BrowserRefusal>,
+{
+    let actions = structural_allow_actions_with(nodes, properties)?;
+    // Presence and selection must share the same consent classification.
+    // A title-bound unrelated bubble must never arm the revocation guard.
+    let prompt_present = !actions.is_empty();
+    let selection = exact_allow_button_for_target(&actions, target_pid, target_hwnd)?;
+    Ok((prompt_present, selection))
+}
+
+fn observe_prompt_presence(
+    saw_prompt: &mut bool,
+    prompt_present: bool,
+) -> Result<(), BrowserRefusal> {
+    if *saw_prompt && !prompt_present {
+        return Err(refusal(
+            BrowserRefusalCode::BrowserConsentRevoked,
+            "the person dismissed the browser consent prompt",
+        ));
+    }
+    *saw_prompt |= prompt_present;
+    Ok(())
 }
 
 unsafe fn invoke(element_ptr: usize) -> Result<(), BrowserRefusal> {
@@ -715,10 +741,6 @@ pub fn dismiss(pid: u32, hwnd: u64) -> Result<bool, BrowserRefusal> {
     loop {
         prove_window_owner(hwnd, pid)?;
         let tree = read_consent_nodes(hwnd)?;
-        let prompt_present = native_prompt_surface_present(&tree.0);
-        if !prompt_present {
-            return Ok(dismissed);
-        }
         let cancel = exact_cancel_button(&tree.0);
         let invoked = match cancel {
             Ok(Some(element)) => unsafe { invoke(element) },
@@ -776,14 +798,18 @@ pub async fn handle(
                 exact_allow_button_from_owned_prompt_windows(pid, hwnd),
                 || {
                     let tree = read_consent_nodes(hwnd)?;
-                    let prompt_present = native_prompt_surface_present(&tree.0);
-                    let selection = exact_allow_button_for_target(&tree.0, pid, hwnd)?;
+                    let (prompt_present, selection) = inline_consent_inspection_with(
+                        &tree.0,
+                        native_button_properties,
+                        pid,
+                        hwnd,
+                    )?;
                     Ok((tree, prompt_present, selection))
                 },
             )
         })
         .await??;
-        saw_prompt |= prompt_present;
+        observe_prompt_presence(&mut saw_prompt, prompt_present)?;
         match selection {
             Some(selection) => {
                 let invoked = request
@@ -795,12 +821,6 @@ pub async fn handle(
                 return Ok(BrowserConsentOutcome::Accepted);
             }
             None => drop(tree),
-        }
-        if saw_prompt && !prompt_present {
-            return Err(BrowserRefusal::new(
-                BrowserRefusalCode::BrowserConsentRevoked,
-                "the person dismissed the browser consent prompt",
-            ));
         }
         if Instant::now() >= deadline {
             return Err(BrowserRefusal::new(
@@ -818,6 +838,32 @@ pub async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unrelated_bubble_disappearance_does_not_revoke_a_later_consent_prompt() {
+        let mut saw_prompt = false;
+        let mut selected = None;
+        for nodes in [
+            unrelated_native_bubble("\u{2067}opaque bubble\u{2069}"),
+            Vec::new(),
+            prompt("\u{2067}العربية\u{2069}", ["👩🏽‍💻", "é", "e\u{301}"]),
+        ] {
+            let (present, selection) =
+                inline_consent_inspection_with(&nodes, |ptr| bubble_properties(ptr, true), 42, 100)
+                    .unwrap();
+            observe_prompt_presence(&mut saw_prompt, present)
+                .expect("an unrelated bubble must not start or revoke the consent wait");
+            selected = selection;
+        }
+        assert!(saw_prompt);
+        assert_eq!(selected.unwrap().element_ptr, 12);
+        assert_eq!(
+            observe_prompt_presence(&mut saw_prompt, false)
+                .unwrap_err()
+                .code,
+            BrowserRefusalCode::BrowserConsentRevoked
+        );
+    }
 
     #[test]
     fn owned_consent_does_not_read_an_unresponsive_main_window() {
