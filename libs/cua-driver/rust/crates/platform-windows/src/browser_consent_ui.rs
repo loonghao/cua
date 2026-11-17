@@ -386,19 +386,29 @@ where
     let mut matches = Vec::new();
     for (start, end) in surfaces {
         let mut candidates = Vec::new();
+        let mut has_dialog_button = false;
+        let mut has_other_native_button = false;
         for node in nodes[(start + 1)..end].iter().filter(|node| {
             is_trusted_prompt_node(nodes, node)
                 && node.control_type == "Button"
-                && node.actions.iter().any(|action| action == "invoke")
-                && node.enabled != Some(false)
                 && node.element_ptr != 0
-                && node.rect.is_some()
         }) {
             let (class_name, has_keyboard_focus) = properties(node.element_ptr)?;
             if class_name != CHROMIUM_DIALOG_BUTTON_CLASS {
+                has_other_native_button = true;
                 continue;
             }
-            let rect = node.rect.expect("filtered above");
+            // Title-bound native surfaces also include translation bubbles.
+            // Only the dialog-control class makes one a consent candidate;
+            // once present, incomplete or disabled consent still fails closed.
+            has_dialog_button = true;
+            if !node.actions.iter().any(|action| action == "invoke") || node.enabled == Some(false)
+            {
+                continue;
+            }
+            let Some(rect) = node.rect else {
+                continue;
+            };
             if rect.0 >= rect.2 || rect.1 >= rect.3 {
                 continue;
             }
@@ -413,6 +423,9 @@ where
                 rect,
                 has_keyboard_focus,
             });
+        }
+        if !has_dialog_button && has_other_native_button {
+            continue;
         }
         let (allow, cancel) = select_language_independent_actions(&candidates)?;
         let rect_of = |ptr: usize| {
@@ -671,10 +684,10 @@ pub fn dismiss(pid: u32, hwnd: u64) -> Result<bool, BrowserRefusal> {
         let cancel = exact_cancel_button(&tree.nodes);
         let invoked = match cancel {
             Ok(Some(element)) => unsafe { invoke(element) },
-            Ok(None) => Err(BrowserRefusal::new(
-                BrowserRefusalCode::BrowserWrongTargetRefused,
-                "the exact remote-debugging consent prompt exposed no structural cancel action",
-            )),
+            Ok(None) => {
+                release_nodes(&tree.nodes);
+                return Ok(dismissed);
+            }
             Err(error) => Err(error),
         };
         release_nodes(&tree.nodes);
@@ -866,6 +879,112 @@ mod tests {
 
     fn properties(element_ptr: usize) -> Result<(String, bool), BrowserRefusal> {
         Ok((CHROMIUM_DIALOG_BUTTON_CLASS.to_owned(), element_ptr == 13))
+    }
+
+    fn unrelated_native_bubble(title: &str) -> Vec<UiaNode> {
+        vec![
+            dialog_node("Pane", title, 2),
+            dialog_node("Text", title, 3),
+            button("opaque icon", 101, (400, 400, 430, 430)),
+            button("opaque icon", 102, (440, 400, 470, 430)),
+            button("opaque action", 103, (400, 440, 470, 470)),
+        ]
+    }
+
+    fn bubble_properties(
+        element_ptr: usize,
+        focused: bool,
+    ) -> Result<(String, bool), BrowserRefusal> {
+        let class = match element_ptr {
+            101 | 102 => "ImageButton",
+            103 => "HoverButton",
+            _ => CHROMIUM_DIALOG_BUTTON_CLASS,
+        };
+        Ok((class.to_owned(), focused && element_ptr == 13))
+    }
+
+    #[test]
+    fn consent_ignores_unrelated_native_bubbles_in_either_walk_order() {
+        for (title, labels) in [
+            ("e\u{301}", ["é", "E\u{301}", "ë"]),
+            ("日本語", ["हिन्दी", "ไทย", "한국어"]),
+            ("\u{2067}العربية\u{2069}", ["עברית", "👩🏽‍💻", "A\u{200d}B"]),
+        ] {
+            for bubble_first in [false, true] {
+                for focused in [false, true] {
+                    for mirrored in [false, true] {
+                        let mut consent = prompt(title, labels);
+                        if mirrored {
+                            for node in &mut consent {
+                                node.rect = node.rect.map(|(l, t, r, b)| (-r, t, -l, b));
+                            }
+                        }
+                        let bubble = unrelated_native_bubble("opaque unrelated title");
+                        let nodes = if bubble_first {
+                            [bubble, consent].concat()
+                        } else {
+                            [consent, bubble].concat()
+                        };
+                        assert_eq!(
+                            exact_allow_button_with(&nodes, |ptr| bubble_properties(ptr, focused))
+                                .unwrap(),
+                            Some(12)
+                        );
+                        assert_eq!(
+                            exact_cancel_button_with(&nodes, |ptr| bubble_properties(ptr, focused))
+                                .unwrap(),
+                            Some(13)
+                        );
+                    }
+                }
+            }
+        }
+        let bubble = unrelated_native_bubble("opaque unrelated title");
+        assert_eq!(
+            exact_allow_button_with(&bubble, |p| bubble_properties(p, false)).unwrap(),
+            None
+        );
+        assert_eq!(
+            exact_cancel_button_with(&bubble, |p| bubble_properties(p, false)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn unrelated_bubbles_do_not_hide_malformed_or_renderer_consent() {
+        for enabled_count in 0..3 {
+            let mut malformed = prompt("incomplete native consent", ["A", "B", "C"]);
+            for (index, node) in malformed[3..].iter_mut().enumerate() {
+                node.element_ptr += 200;
+                node.element_index = Some(node.element_ptr);
+                node.enabled = Some(index < enabled_count);
+            }
+            let mut nodes = prompt("valid native consent", ["D", "E", "F"]);
+            nodes.extend(unrelated_native_bubble("opaque unrelated title"));
+            nodes.extend(malformed);
+            for result in [
+                exact_allow_button_with(&nodes, |p| bubble_properties(p, true)),
+                exact_cancel_button_with(&nodes, |p| bubble_properties(p, true)),
+            ] {
+                assert_eq!(
+                    result.unwrap_err().code,
+                    BrowserRefusalCode::BrowserWrongTargetRefused
+                );
+            }
+        }
+        let mut spoof = prompt("renderer title", ["A", "B", "C"]);
+        for node in &mut spoof {
+            node.in_web_content = true;
+        }
+        spoof.extend(unrelated_native_bubble("opaque unrelated title"));
+        assert_eq!(
+            exact_allow_button_with(&spoof, |p| bubble_properties(p, false)).unwrap(),
+            None
+        );
+        assert_eq!(
+            exact_cancel_button_with(&spoof, |p| bubble_properties(p, false)).unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
