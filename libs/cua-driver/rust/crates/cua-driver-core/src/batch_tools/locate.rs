@@ -342,6 +342,7 @@ fn opt_u64(object: &Map<String, Value>, key: &str) -> Result<Option<u64>, String
 pub(crate) struct Window {
     pub pid: i64,
     pub window_id: u64,
+    pub process_birth_time: Option<u64>,
     pub app: Option<String>,
     pub title: Option<String>,
     pub on_screen: bool,
@@ -365,6 +366,7 @@ impl Window {
         json!({
             "pid": self.pid,
             "window_id": self.window_id,
+            "process_birth_time": self.process_birth_time,
             "app": self.app,
             "title": self.title,
         })
@@ -494,6 +496,7 @@ impl<'a> Locator<'a> {
             return Ok(Window {
                 pid,
                 window_id,
+                process_birth_time: None,
                 app: None,
                 title: None,
                 on_screen: true,
@@ -629,6 +632,7 @@ impl<'a> Locator<'a> {
                     .get("window_id")
                     .and_then(Value::as_u64)
                     .unwrap_or_default(),
+                process_birth_time: window.get("process_birth_time").and_then(Value::as_u64),
                 app: window
                     .get("app_name")
                     .and_then(Value::as_str)
@@ -1544,6 +1548,7 @@ mod tests {
             window: Window {
                 pid: 1,
                 window_id: 2,
+                process_birth_time: None,
                 app: Some("Demo".into()),
                 title: Some("Doc".into()),
                 on_screen: true,

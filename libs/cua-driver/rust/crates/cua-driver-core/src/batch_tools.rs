@@ -647,6 +647,7 @@ impl Plan {
             (Some(pid), Some(window_id)) => Some(Window {
                 pid,
                 window_id,
+                process_birth_time: None,
                 app: None,
                 title: None,
                 on_screen: true,
@@ -968,6 +969,7 @@ async fn run_step(
             *last_window = Some(Window {
                 pid,
                 window_id,
+                process_birth_time: None,
                 app: None,
                 title: None,
                 on_screen: true,
@@ -1276,6 +1278,7 @@ impl Recovery {
                 window: Window {
                     pid: last.pid,
                     window_id: holder,
+                    process_birth_time: last.process_birth_time,
                     app: None,
                     title: None,
                     on_screen: true,

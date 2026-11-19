@@ -24,6 +24,7 @@ fn window(hwnd: u64, pid: u32) -> WindowInfo {
     WindowInfo {
         hwnd,
         pid,
+        process_birth_time: None,
         title: format!("window {hwnd}"),
         x: 0,
         y: 0,

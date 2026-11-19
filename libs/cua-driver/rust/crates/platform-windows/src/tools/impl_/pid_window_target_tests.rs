@@ -5,6 +5,7 @@ fn window(hwnd: u64, pid: u32) -> crate::win32::WindowInfo {
     crate::win32::WindowInfo {
         hwnd,
         pid,
+        process_birth_time: None,
         title: format!("Document {hwnd}"),
         x: 0,
         y: 0,

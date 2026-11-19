@@ -941,7 +941,7 @@ impl Tool for ListWindowsTool {
                 Use this — not list_apps — for any window-level reasoning: \"does this app \
                 have a visible window right now?\", \"which of this pid's windows is the main \
                 one?\".\n\n\
-                Per-record fields: window_id (HWND), pid + app_name, title, \
+                Per-record fields: window_id (HWND), pid, process_birth_time + app_name, title, \
                 bounds {x, y, width, height}, layer (always 0), z_index (integer or null; higher \
                 values are closer to the front; null means stacking order is unavailable and \
                 callers must not infer one), is_on_screen, minimized. To select a frontmost \
@@ -1027,6 +1027,7 @@ impl Tool for ListWindowsTool {
                 json!({
                     "window_id":  w.hwnd,
                     "pid":        w.pid,
+                    "process_birth_time": w.process_birth_time,
                     "app_name":   app_name,
                     "title":      w.title,
                     "bounds":     { "x": w.x, "y": w.y, "width": w.width, "height": w.height },
@@ -1085,6 +1086,7 @@ impl Tool for ListWindowsTool {
             .map(|w| {
                 json!({
                     "window_id": w.hwnd, "pid": w.pid, "title": w.title,
+                    "process_birth_time": w.process_birth_time,
                     "x": w.x, "y": w.y, "width": w.width, "height": w.height,
                     "is_on_screen": w.is_on_screen, "minimized": w.minimized,
                 })
@@ -1265,6 +1267,7 @@ impl Tool for GetWindowStateTool {
                 "session": cua_driver_core::tool_schema::session_schema(),
                 "pid":{"type":"integer","description":"Process ID from `list_apps`."},
                 "window_id":{"type":"integer","description":"HWND of the target window. Must belong to `pid`. Enumerate via `list_windows` or read from `launch_app`'s `windows` array."},
+                "process_birth_time":{"type":"integer","minimum":0,"description":"Optional Windows process creation FILETIME ticks from list_windows. Rejects recycled PID bindings."},
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
                 "include_accessibility_tree":{"type":"boolean","description":"Default true — walk the UIA tree and return it (per `tree_format`) alongside the screenshot. Set false to SKIP the UIA walk entirely and return just the screenshot plus window metadata (window_bounds, app_name, window_title) — the capture-only path for a live window preview / picture-in-picture. Mirrors include_screenshot. Setting BOTH include_accessibility_tree:false AND include_screenshot:false is an error (nothing to return)."},
                 "include_screenshot":{"type":"boolean","description":"Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return tree only (the cheap path for re-indexing before an element ax action)."},
@@ -1322,6 +1325,24 @@ impl Tool for GetWindowStateTool {
                 ));
             }
         };
+        let requested_birth_time = args
+            .get("process_birth_time")
+            .and_then(|value| value.as_u64());
+        let bound_birth_time = window
+            .process_birth_time
+            .or_else(|| crate::win32::process_birth_time(pid));
+        let Some(bound_birth_time) = bound_birth_time else {
+            return ToolResult::error(format!(
+                "cannot establish process birth time for pid {pid}; refusing an unbound window capture"
+            ));
+        };
+        if let Some(requested) = requested_birth_time {
+            if requested != bound_birth_time {
+                return ToolResult::error(format!(
+                    "stale process binding: pid {pid} birth time {requested} does not match current {bound_birth_time}"
+                ));
+            }
+        }
         // Window identity metadata (additive): title + on-screen rectangle from
         // the lookup we already did, plus the owning process's executable
         // name. Names the surface on the capture-only path, where no UIA tree
@@ -1496,6 +1517,11 @@ impl Tool for GetWindowStateTool {
             // The previous `Err(_) => None` silently dropped the error and
             // upstream agents saw an empty response with no signal.
             let (screenshot, screenshot_err) = if do_shot {
+                if let Err(error) =
+                    crate::win32::validate_window_binding(pid, hwnd, Some(bound_birth_time))
+                {
+                    return Ok((None, Some(error)));
+                }
                 match crate::capture::screenshot_window_bytes(hwnd) {
                     Ok(raw) => {
                         let (native_w, native_h) = crate::capture::png_dimensions_pub(&raw)?;
@@ -1544,7 +1570,11 @@ impl Tool for GetWindowStateTool {
         match result {
             Ok((tree_opt, screenshot_opt, screenshot_err)) => {
                 let mut content = Vec::new();
-                let mut structured = json!({ "window_id": hwnd, "pid": pid });
+                let mut structured = json!({
+                    "window_id": hwnd,
+                    "pid": pid,
+                    "process_birth_time": bound_birth_time,
+                });
                 let screenshot_scale = screenshot_opt
                     .as_ref()
                     .map(|(_, _, w, _, native_w, _, _)| *native_w as f64 / *w as f64);
@@ -9197,6 +9227,7 @@ impl Tool for GetAccessibilityTreeTool {
             "processes": procs.iter().map(|p| json!({"pid":p.pid,"name":p.name})).collect::<Vec<_>>(),
             "windows": windows.iter().map(|w| json!({
                 "window_id": w.hwnd, "pid": w.pid, "title": w.title,
+                "process_birth_time": w.process_birth_time,
                 "x": w.x, "y": w.y, "width": w.width, "height": w.height
             })).collect::<Vec<_>>()
         });

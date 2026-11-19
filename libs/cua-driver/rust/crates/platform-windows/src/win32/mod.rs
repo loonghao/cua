@@ -10,6 +10,7 @@ pub use installed_apps::{list_installed_apps, InstalledApp};
 pub(crate) use windows::{
     capture_foreground_target, find_window_by_pid_and_handle,
     foreground_matches_target_or_owned_window, list_windows_via_win32, list_windows_win32_first,
-    lookup_window_for_pid, resolve_uwp_app_pid, window_owner_pid, PidWindowLookup,
+    lookup_window_for_pid, process_birth_time, resolve_uwp_app_pid, validate_window_binding,
+    window_owner_pid, PidWindowLookup,
 };
 pub use windows::{list_windows, resolve_uwp_host_window, WindowInfo};

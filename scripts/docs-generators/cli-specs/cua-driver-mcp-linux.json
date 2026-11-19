@@ -101,6 +101,11 @@
       "description": "Process ID that owns the window.",
       "type": "integer"
      },
+     "process_birth_time": {
+      "description": "Optional process creation timestamp from list_windows. Accepted for cross-platform contract parity and ignored on Linux.",
+      "minimum": 0,
+      "type": "integer"
+     },
      "query": {
       "description": "Optional case-insensitive substring. Projects both tree_markdown and structured elements to matches plus ancestors while preserving original indices. Compare total_element_count with returned_element_count.",
       "type": "string"
@@ -2527,12 +2532,21 @@
    "read_only": false
   },
   {
-   "description": "Navigate one tab of an exactly-bound browser target to a new URL (http/https/about only). Refused for heuristic bindings. Navigation invalidates all p<snapshot>:<index> refs for the tab.",
+   "description": "Navigate one tab of an exactly-bound browser target to a new URL (http/https/about only). Refused for heuristic bindings. Navigation invalidates all p<snapshot>:<index> refs for the tab. The structured receipt reports status, delivery_mode, dispatched, activation_state, readback_state, refs_invalidated, and error_code. Background reports activation_state and readback_state as not_requested. Foreground activates the exact tab and verifies frame and loader identity before reporting readback, including current_url, title, heading, visibility_state, and ready_state. Stable error codes are navigation_dispatch_failed, navigation_rejected, target_activation_failed, navigation_identity_missing, navigation_commit_not_observed, foreground_readback_failed, foreground_readback_timeout, and target_drift_after_navigation.",
    "destructive": false,
    "idempotent": false,
    "input_schema": {
     "additionalProperties": true,
     "properties": {
+     "delivery_mode": {
+      "default": "background",
+      "description": "Background preserves the selected tab. Foreground explicitly selects this exact tab and returns live page readback.",
+      "enum": [
+       "background",
+       "foreground"
+      ],
+      "type": "string"
+     },
      "session": {
       "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session.",
       "type": "string"

@@ -18,7 +18,7 @@
    "read_only": true
   },
   {
-   "description": "List every top-level window currently known to the window manager. Each record self-contains its owning app identity so the caller never has to join back against list_apps.\n\nUse this — not list_apps — for any window-level reasoning: \"does this app have a visible window right now?\", \"which of this pid's windows is the main one?\".\n\nPer-record fields: window_id (HWND), pid + app_name, title, bounds {x, y, width, height}, layer (always 0), z_index (integer or null; higher values are closer to the front; null means stacking order is unavailable and callers must not infer one), is_on_screen, minimized. To select a frontmost candidate, take the maximum integer z_index; if every value is null, use an explicit fallback instead of relying on array order. The macOS-specific on_current_space / space_ids fields are omitted on Windows; current_space_id is null.\n\nInputs: pid (optional pid filter), app (app-name filter), on_screen_only (bool, default false). Filter with app or pid: an unfiltered call lists every window. The driver's own overlay is omitted.",
+   "description": "List every top-level window currently known to the window manager. Each record self-contains its owning app identity so the caller never has to join back against list_apps.\n\nUse this — not list_apps — for any window-level reasoning: \"does this app have a visible window right now?\", \"which of this pid's windows is the main one?\".\n\nPer-record fields: window_id (HWND), pid, process_birth_time + app_name, title, bounds {x, y, width, height}, layer (always 0), z_index (integer or null; higher values are closer to the front; null means stacking order is unavailable and callers must not infer one), is_on_screen, minimized. To select a frontmost candidate, take the maximum integer z_index; if every value is null, use an explicit fallback instead of relying on array order. The macOS-specific on_current_space / space_ids fields are omitted on Windows; current_space_id is null.\n\nInputs: pid (optional pid filter), app (app-name filter), on_screen_only (bool, default false). Filter with app or pid: an unfiltered call lists every window. The driver's own overlay is omitted.",
    "destructive": false,
    "idempotent": true,
    "input_schema": {
@@ -99,6 +99,11 @@
      },
      "pid": {
       "description": "Process ID from `list_apps`.",
+      "type": "integer"
+     },
+     "process_birth_time": {
+      "description": "Optional Windows process creation FILETIME ticks from list_windows. Rejects recycled PID bindings.",
+      "minimum": 0,
       "type": "integer"
      },
      "query": {
@@ -2222,12 +2227,21 @@
    "read_only": false
   },
   {
-   "description": "Navigate one tab of an exactly-bound browser target to a new URL (http/https/about only). Refused for heuristic bindings. Navigation invalidates all p<snapshot>:<index> refs for the tab.",
+   "description": "Navigate one tab of an exactly-bound browser target to a new URL (http/https/about only). Refused for heuristic bindings. Navigation invalidates all p<snapshot>:<index> refs for the tab. The structured receipt reports status, delivery_mode, dispatched, activation_state, readback_state, refs_invalidated, and error_code. Background reports activation_state and readback_state as not_requested. Foreground activates the exact tab and verifies frame and loader identity before reporting readback, including current_url, title, heading, visibility_state, and ready_state. Stable error codes are navigation_dispatch_failed, navigation_rejected, target_activation_failed, navigation_identity_missing, navigation_commit_not_observed, foreground_readback_failed, foreground_readback_timeout, and target_drift_after_navigation.",
    "destructive": false,
    "idempotent": false,
    "input_schema": {
     "additionalProperties": true,
     "properties": {
+     "delivery_mode": {
+      "default": "background",
+      "description": "Background preserves the selected tab. Foreground explicitly selects this exact tab and returns live page readback.",
+      "enum": [
+       "background",
+       "foreground"
+      ],
+      "type": "string"
+     },
      "session": {
       "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session. Browser targets, tabs, and refs belong to the resolved lifecycle session.",
       "type": "string"
