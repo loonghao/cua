@@ -67,6 +67,11 @@ pub(super) struct FixtureState {
     viewport_css_width: f64,
     viewport_css_height: f64,
     tab_visible: bool,
+    navigation_commits: bool,
+    navigation_rejected: bool,
+    navigation_dispatch_fails: bool,
+    navigation_readback_url: Option<String>,
+    activation_fails: bool,
     select_outcome: Value,
     /// Extra page targets Chromium reports but cannot map to any browser
     /// window (`Browser.getWindowForTarget` → `-32000 Browser window not
@@ -114,6 +119,11 @@ impl Default for FixtureState {
             viewport_css_width: 800.0,
             viewport_css_height: 600.0,
             tab_visible: true,
+            navigation_commits: true,
+            navigation_rejected: false,
+            navigation_dispatch_fails: false,
+            navigation_readback_url: None,
+            activation_fails: false,
             select_outcome: Value::Null,
             dom_click_changes_readback: true,
             dom_click_readback_available: true,
@@ -607,13 +617,52 @@ fn fixture_handler(state: SharedState) -> MockHandler {
                     }
                 }))
             }
+            "Runtime.evaluate"
+                if call.params["expression"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("JSON.stringify({current_url:")) =>
+            {
+                MockReply::ok(json!({
+                    "result": {
+                        "type": "string",
+                        "value": serde_json::to_string(&json!({
+                            "current_url": st.navigation_readback_url.as_deref().unwrap_or(&st.main_url),
+                            "title": "Foreground fixture",
+                            "heading": "Activated tab",
+                            "visibility_state": "visible",
+                            "ready_state": "complete"
+                        })).unwrap()
+                    }
+                }))
+            }
             "Page.captureScreenshot" if is_tab => {
                 MockReply::ok(json!({"data": st.screenshot_data.clone()}))
             }
-            "Page.navigate" if is_tab => MockReply::ok(json!({
-                "frameId": "F_MAIN",
-                "loaderId": "L_MAIN_NAVIGATED",
-            })),
+            "Target.activateTarget" => {
+                if st.activation_fails {
+                    MockReply::err(-32000, "fixture activation failure")
+                } else {
+                    st.tab_visible = true;
+                    MockReply::ok(json!({}))
+                }
+            }
+            "Page.navigate" if is_tab => {
+                if st.navigation_dispatch_fails {
+                    MockReply::err(-32000, "fixture navigation transport failure")
+                } else if st.navigation_rejected {
+                    MockReply::ok(json!({"errorText": "ERR_ABORTED"}))
+                } else {
+                    let url = call.params["url"].as_str().unwrap_or_default();
+                    if st.navigation_commits {
+                        st.main_url = url.to_owned();
+                        st.main_loader = "L_MAIN_NAVIGATED".into();
+                    }
+                    MockReply::ok(json!({
+                        "frameId": "F_MAIN",
+                        "loaderId": if st.navigation_commits { "L_MAIN_NAVIGATED" } else { "L_MAIN_1" },
+                    }))
+                }
+            }
             "Target.setAutoAttach" if is_tab => {
                 if call.params["autoAttach"].as_bool() == Some(false) {
                     return MockReply::ok(json!({}));
@@ -2352,6 +2401,80 @@ async fn navigation_targets_an_inactive_tab_without_activating_it() {
     );
     assert!(recorded_calls(&f, "Page.bringToFront").is_empty());
     assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
+}
+
+#[tokio::test]
+async fn foreground_navigation_activates_the_exact_tab_and_returns_readback() {
+    let f = fixture().await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/foreground-navigation",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = structured(&result);
+    assert_eq!(receipt["status"], "ok", "{receipt}");
+    assert_eq!(receipt["delivery_mode"], "foreground", "{receipt}");
+    assert_eq!(receipt["activation_state"], "succeeded", "{receipt}");
+    assert_eq!(receipt["readback_state"], "succeeded", "{receipt}");
+    assert_eq!(
+        receipt["current_url"],
+        "https://fixture.test/foreground-navigation"
+    );
+    assert_eq!(recorded_calls(&f, "Target.activateTarget").len(), 1);
+}
+
+#[tokio::test]
+async fn navigation_rejection_returns_a_dispatched_partial_receipt() {
+    let f = fixture_with(|state| state.navigation_rejected = true).await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/rejected",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = structured(&result);
+    assert_eq!(receipt["status"], "error", "{receipt}");
+    assert_eq!(receipt["error_code"], "navigation_rejected", "{receipt}");
+    assert_eq!(receipt["dispatched"], true, "{receipt}");
+    assert_eq!(receipt["activation_state"], "not_started", "{receipt}");
+    assert_eq!(receipt["readback_state"], "not_started", "{receipt}");
+    assert!(recorded_calls(&f, "Target.activateTarget").is_empty());
+}
+
+#[tokio::test]
+async fn foreground_navigation_reports_activation_failure_after_dispatch() {
+    let f = fixture_with(|state| state.activation_fails = true).await;
+    let (target, tab) = bind(&f).await;
+    let result = BrowserNavigateTool::new(f.engine.clone())
+        .invoke(json!({
+            "target_id": target,
+            "tab_id": tab,
+            "url": "https://fixture.test/activation-failure",
+            "delivery_mode": "foreground",
+            "session": SESSION,
+        }))
+        .await;
+
+    let receipt = structured(&result);
+    assert_eq!(receipt["status"], "error", "{receipt}");
+    assert_eq!(
+        receipt["error_code"], "target_activation_failed",
+        "{receipt}"
+    );
+    assert_eq!(receipt["dispatched"], true, "{receipt}");
+    assert_eq!(receipt["activation_state"], "failed", "{receipt}");
+    assert_eq!(receipt["readback_state"], "not_started", "{receipt}");
 }
 
 #[tokio::test]

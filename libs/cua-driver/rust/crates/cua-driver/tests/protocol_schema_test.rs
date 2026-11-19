@@ -237,6 +237,7 @@ fn assert_tools_list_schema_shape(mut d: RawDriver) {
         // Trusted browser input may activate the browser window (Linux
         // Chromium); foreground accepts that.
         "browser_click",
+        "browser_navigate",
         "browser_pointer",
         // Existing-profile attachment that would bring the browser forward
         // (macOS Chrome); foreground accepts that.
