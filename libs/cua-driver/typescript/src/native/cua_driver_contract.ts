@@ -2955,6 +2955,11 @@ const FfiConverterTypeGetSessionStateInput = (() => {
 export type GetWindowStateInput = {
     pid: number,
     windowId: bigint,
+    /**
+     * Optional Windows process creation timestamp (FILETIME ticks). When
+     * supplied, the driver rejects a recycled PID before reading the window.
+     */
+    processBirthTime?: bigint,
     session?: string,
     query?: string,
     includeAccessibilityTree?: boolean,
@@ -2999,6 +3004,7 @@ export type GetWindowStateInput = {
  */
 export const GetWindowStateInput = (() => {
     const defaults = () => ({
+        processBirthTime: undefined,
         timeoutMs: undefined,
         treeFormat: undefined,
         since: undefined,
@@ -3022,6 +3028,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
             return {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterUInt64.read(from),
+                processBirthTime: FfiConverterOptionalUInt64.read(from),
                 session: FfiConverterOptionalString.read(from),
                 query: FfiConverterOptionalString.read(from),
                 includeAccessibilityTree: FfiConverterOptionalBoolean.read(from),
@@ -3041,6 +3048,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
         write(value: TypeName, into: RustBuffer): void {
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterUInt64.write(value.windowId, into);
+            FfiConverterOptionalUInt64.write(value.processBirthTime, into);
             FfiConverterOptionalString.write(value.session, into);
             FfiConverterOptionalString.write(value.query, into);
             FfiConverterOptionalBoolean.write(value.includeAccessibilityTree, into);
@@ -3059,6 +3067,7 @@ const FfiConverterTypeGetWindowStateInput = (() => {
         allocationSize(value: TypeName): number {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalUInt64.allocationSize(value.processBirthTime) +
              FfiConverterOptionalString.allocationSize(value.session) +
              FfiConverterOptionalString.allocationSize(value.query) +
              FfiConverterOptionalBoolean.allocationSize(value.includeAccessibilityTree) +
@@ -3656,6 +3665,10 @@ const FfiConverterTypeWindowBounds = (() => {
 export type WindowInfo = {
     windowId: bigint,
     pid?: number,
+    /**
+     * Native process creation timestamp when the provider can prove it.
+     */
+    processBirthTime?: bigint,
     appName: string,
     title: string,
     bounds: WindowBounds,
@@ -3694,6 +3707,7 @@ const FfiConverterTypeWindowInfo = (() => {
             return {
                 windowId: FfiConverterUInt64.read(from),
                 pid: FfiConverterOptionalUInt32.read(from),
+                processBirthTime: FfiConverterOptionalUInt64.read(from),
                 appName: FfiConverterString.read(from),
                 title: FfiConverterString.read(from),
                 bounds: FfiConverterTypeWindowBounds.read(from),
@@ -3709,6 +3723,7 @@ const FfiConverterTypeWindowInfo = (() => {
         write(value: TypeName, into: RustBuffer): void {
             FfiConverterUInt64.write(value.windowId, into);
             FfiConverterOptionalUInt32.write(value.pid, into);
+            FfiConverterOptionalUInt64.write(value.processBirthTime, into);
             FfiConverterString.write(value.appName, into);
             FfiConverterString.write(value.title, into);
             FfiConverterTypeWindowBounds.write(value.bounds, into);
@@ -3723,6 +3738,7 @@ const FfiConverterTypeWindowInfo = (() => {
         allocationSize(value: TypeName): number {
             return FfiConverterUInt64.allocationSize(value.windowId) +
              FfiConverterOptionalUInt32.allocationSize(value.pid) +
+             FfiConverterOptionalUInt64.allocationSize(value.processBirthTime) +
              FfiConverterString.allocationSize(value.appName) +
              FfiConverterString.allocationSize(value.title) +
              FfiConverterTypeWindowBounds.allocationSize(value.bounds) +
@@ -6419,6 +6435,7 @@ const FfiConverterTypeWindowElement = (() => {
 export type WindowStateOutput = {
     pid: number,
     windowId: bigint,
+    processBirthTime?: bigint,
     snapshotId?: string,
     appName?: string,
     windowTitle?: string,
@@ -6492,6 +6509,7 @@ const FfiConverterTypeWindowStateOutput = (() => {
             return {
                 pid: FfiConverterUInt32.read(from),
                 windowId: FfiConverterUInt64.read(from),
+                processBirthTime: FfiConverterOptionalUInt64.read(from),
                 snapshotId: FfiConverterOptionalString.read(from),
                 appName: FfiConverterOptionalString.read(from),
                 windowTitle: FfiConverterOptionalString.read(from),
@@ -6524,6 +6542,7 @@ const FfiConverterTypeWindowStateOutput = (() => {
         write(value: TypeName, into: RustBuffer): void {
             FfiConverterUInt32.write(value.pid, into);
             FfiConverterUInt64.write(value.windowId, into);
+            FfiConverterOptionalUInt64.write(value.processBirthTime, into);
             FfiConverterOptionalString.write(value.snapshotId, into);
             FfiConverterOptionalString.write(value.appName, into);
             FfiConverterOptionalString.write(value.windowTitle, into);
@@ -6555,6 +6574,7 @@ const FfiConverterTypeWindowStateOutput = (() => {
         allocationSize(value: TypeName): number {
             return FfiConverterUInt32.allocationSize(value.pid) +
              FfiConverterUInt64.allocationSize(value.windowId) +
+             FfiConverterOptionalUInt64.allocationSize(value.processBirthTime) +
              FfiConverterOptionalString.allocationSize(value.snapshotId) +
              FfiConverterOptionalString.allocationSize(value.appName) +
              FfiConverterOptionalString.allocationSize(value.windowTitle) +

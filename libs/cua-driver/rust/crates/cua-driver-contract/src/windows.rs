@@ -23,6 +23,10 @@ fn nonnegative_integer_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"integer", "minimum":0})
 }
 
+fn nonnegative_u64_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"type":"integer", "minimum":0, "maximum":18446744073709551615_u64})
+}
+
 fn nullable_pid_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":["integer","null"], "minimum":0, "maximum":4294967295_u64})
 }
@@ -68,6 +72,12 @@ pub struct GetWindowStateInput {
     pub pid: u32,
     #[schemars(schema_with = "positive_integer_schema")]
     pub window_id: u64,
+    /// Optional Windows process creation timestamp (FILETIME ticks). When
+    /// supplied, the driver rejects a recycled PID before reading the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "nonnegative_u64_schema")]
+    #[uniffi(default = None)]
+    pub process_birth_time: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "string_schema")]
     pub session: Option<String>,
@@ -215,6 +225,10 @@ pub struct WindowInfo {
     #[serde(deserialize_with = "required_nullable")]
     #[schemars(required, schema_with = "nullable_pid_schema")]
     pub pid: Option<u32>,
+    /// Native process creation timestamp when the provider can prove it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "nonnegative_u64_schema")]
+    pub process_birth_time: Option<u64>,
     pub app_name: String,
     pub title: String,
     pub bounds: WindowBounds,
@@ -301,6 +315,9 @@ pub struct SnapshotImage {
 pub struct WindowStateOutput {
     pub pid: u32,
     pub window_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "nonnegative_u64_schema")]
+    pub process_birth_time: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

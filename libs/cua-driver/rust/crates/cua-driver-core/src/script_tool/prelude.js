@@ -81,6 +81,7 @@
     constructor(info) {
       this.pid = info.pid;
       this.windowId = info.window_id;
+      this.processBirthTime = info.process_birth_time ?? null;
       this.name = info.app || null;
       this.title = info.title || null;
       this.snapshotId = null;
@@ -95,11 +96,13 @@
       const info = call("get_app", this.where());
       this.windowId = info.window_id;
       this.title = info.title || this.title;
+      this.processBirthTime = info.process_birth_time ?? this.processBirthTime;
       return info;
     }
     async getState(options = {}) {
       const info = await this.window();
-      const state = call("get_window_state", { pid: this.pid, window_id: info.window_id, ...options });
+      const binding = this.processBirthTime == null ? {} : { process_birth_time: this.processBirthTime };
+      const state = call("get_window_state", { pid: this.pid, window_id: info.window_id, ...binding, ...options });
       if (state && state.snapshot_id) this.snapshotId = state.snapshot_id;
       return state;
     }

@@ -1003,6 +1003,7 @@ unsafe fn window_info_from_uia_element(elem: &IUIAutomationElement) -> Option<Wi
     Some(WindowInfo {
         hwnd: hwnd.0 as u64,
         pid,
+        process_birth_time: crate::win32::process_birth_time(pid),
         title,
         x,
         y,

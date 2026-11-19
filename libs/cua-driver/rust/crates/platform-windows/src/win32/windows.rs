@@ -21,8 +21,11 @@
 
 use std::collections::HashSet;
 use std::sync::Mutex;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::Foundation::{CloseHandle, BOOL, FILETIME, HWND, LPARAM, RECT, TRUE};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::System::Threading::{
+    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetWindow, GetWindowRect, GetWindowTextLengthW,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, GW_OWNER,
@@ -34,6 +37,8 @@ pub struct WindowInfo {
     pub hwnd: u64,
     /// pid owning the window.
     pub pid: u32,
+    /// Windows process creation timestamp (FILETIME ticks), when readable.
+    pub process_birth_time: Option<u64>,
     pub title: String,
     pub x: i32,
     pub y: i32,
@@ -101,6 +106,62 @@ pub(crate) enum PidWindowLookup {
     OtherPid(u32),
     /// No listed window has this HWND.
     Missing,
+}
+
+/// Read the process creation timestamp used to distinguish a recycled PID.
+pub(crate) fn process_birth_time(pid: u32) -> Option<u64> {
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let result =
+        unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
+    let _ = unsafe { CloseHandle(handle) };
+    result.ok()?;
+    Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+/// Revalidate a previously enumerated `(pid, HWND, birth_time)` immediately
+/// before a window operation. This closes the PID-reuse and HWND-reuse gap
+/// between discovery and capture.
+pub(crate) fn validate_window_binding(
+    pid: u32,
+    hwnd: u64,
+    expected_birth_time: Option<u64>,
+) -> Result<u64, String> {
+    validate_window_binding_with(
+        pid,
+        hwnd,
+        expected_birth_time,
+        |hwnd| window_owner_pid(hwnd),
+        |pid| process_birth_time(pid),
+    )
+}
+
+fn validate_window_binding_with(
+    pid: u32,
+    hwnd: u64,
+    expected_birth_time: Option<u64>,
+    owner_of: impl Fn(u64) -> Option<u32>,
+    birth_of: impl Fn(u32) -> Option<u64>,
+) -> Result<u64, String> {
+    let owner = owner_of(hwnd)
+        .ok_or_else(|| format!("window binding is stale: HWND {hwnd} is no longer live"))?;
+    if owner != pid {
+        return Err(format!(
+            "window binding mismatch: HWND {hwnd} belongs to pid {owner}, not pid {pid}"
+        ));
+    }
+    let actual = birth_of(pid).ok_or_else(|| format!("cannot read birth time for pid {pid}"))?;
+    if let Some(expected) = expected_birth_time {
+        if expected != actual {
+            return Err(format!(
+                "stale process binding: pid {pid} birth time changed from {expected} to {actual}"
+            ));
+        }
+    }
+    Ok(actual)
 }
 
 /// Validate that `hwnd` is a listed top-level window of `pid`.
@@ -296,6 +357,7 @@ fn window_info_by_handle(hwnd: u64) -> Option<WindowInfo> {
     Some(WindowInfo {
         hwnd,
         pid,
+        process_birth_time: process_birth_time(pid),
         title,
         x,
         y,
@@ -363,6 +425,7 @@ unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     state.lock().unwrap().windows.push(WindowInfo {
         hwnd: hwnd.0 as u64,
         pid,
+        process_birth_time: process_birth_time(pid),
         title,
         x,
         y,
@@ -402,8 +465,8 @@ fn get_window_bounds(hwnd: HWND) -> (i32, i32, i32, i32) {
 mod exact_window_tests {
     use super::{
         exact_window_from_probe, lookup_window_for_pid_with, owner_chain_reaches_target,
-        post_action_foreground_allowed, win32_first_with, PidWindowLookup,
-        PostActionForegroundRelation, WindowInfo,
+        post_action_foreground_allowed, validate_window_binding_with, win32_first_with,
+        PidWindowLookup, PostActionForegroundRelation, WindowInfo,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -411,6 +474,7 @@ mod exact_window_tests {
         WindowInfo {
             hwnd,
             pid,
+            process_birth_time: None,
             title: "Exact target".into(),
             x: 0,
             y: 0,
@@ -455,6 +519,25 @@ mod exact_window_tests {
 
         let missing = lookup_window_for_pid_with(42, 0x1234, |_, _| None, Vec::new);
         assert!(matches!(missing, PidWindowLookup::Missing));
+    }
+
+    #[test]
+    fn window_binding_rejects_cross_process_and_recycled_pid() {
+        let owner = |hwnd| (hwnd == 0x1234).then_some(42);
+        let birth = |pid| (pid == 42).then_some(100);
+        assert!(validate_window_binding_with(42, 0x1234, Some(100), owner, birth).is_ok());
+
+        let owner = |hwnd| (hwnd == 0x1234).then_some(99);
+        let birth = |pid| (pid == 42).then_some(100);
+        let error = validate_window_binding_with(42, 0x1234, Some(100), owner, birth)
+            .expect_err("foreign process must not capture the HWND");
+        assert!(error.contains("belongs to pid 99"), "{error}");
+
+        let owner = |hwnd| (hwnd == 0x1234).then_some(42);
+        let birth = |pid| (pid == 42).then_some(200);
+        let error = validate_window_binding_with(42, 0x1234, Some(100), owner, birth)
+            .expect_err("recycled PID must not reuse the old binding");
+        assert!(error.contains("birth time changed"), "{error}");
     }
 
     #[test]
@@ -712,6 +795,7 @@ pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
     Some(WindowInfo {
         hwnd: frame.0 as u64,
         pid: afh_pid,
+        process_birth_time: process_birth_time(afh_pid),
         title,
         x,
         y,

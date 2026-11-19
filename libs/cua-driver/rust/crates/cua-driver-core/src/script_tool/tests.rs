@@ -40,7 +40,7 @@ impl Tool for Fake {
             .push((name.clone(), args.clone()));
         match name.as_str() {
             "list_windows" => ToolResult::text("windows").with_structured(json!({"windows": [{
-                "pid": 42, "window_id": 7, "app_name": "Notes", "title": "Draft",
+                "pid": 42, "window_id": 7, "process_birth_time": 1234, "app_name": "Notes", "title": "Draft",
                 "z_index": 1, "is_on_screen": true,
                 "bounds": {"x": 0.0, "y": 0.0, "width": 800.0, "height": 600.0}
             }]})),
@@ -48,7 +48,7 @@ impl Tool for Fake {
                 {"pid": 42, "name": "Notes", "bundle_id": "com.example.notes", "running": true, "active": true}
             ]})),
             "get_window_state" => ToolResult::text("- [0] AXWindow \"Draft\"").with_structured(json!({
-                "pid": 42, "window_id": 7, "snapshot_id": "s00000009",
+                "pid": 42, "window_id": 7, "process_birth_time": 1234, "snapshot_id": "s00000009",
                 "tree_markdown": "- [0] AXWindow \"Draft\"\n  - [1] AXTextField \"Name\"\n  - [2] AXButton \"Save\"\n  - AXStaticText \"Saved\"\n",
                 "elements": [
                     {"element_index": 1, "element_token": "s00000009:1", "role": "AXTextField", "label": "Name", "value": "Ada", "depth": 1},
@@ -569,6 +569,13 @@ async fn script_actions_are_paced_as_batched_steps_and_reads_are_not() {
         )
         .await;
     assert_ne!(result.is_error, Some(true), "{result:?}");
+    let calls = harness.calls.lock().unwrap().clone();
+    assert!(
+        calls.iter().any(|(name, args)| {
+            name == "get_window_state" && args["process_birth_time"] == 1234
+        }),
+        "window birth-time binding was not forwarded: {calls:?}"
+    );
     let pacings = harness.pacings.lock().unwrap().clone();
     let of = |tool: &str| -> Vec<crate::step_pacing::StepPacing> {
         pacings
