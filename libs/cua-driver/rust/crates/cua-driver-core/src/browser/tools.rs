@@ -1116,7 +1116,18 @@ impl BrowserNavigateTool {
             name: "browser_navigate".into(),
             description: "Navigate one tab of an exactly-bound browser target to a \
                 new URL (http/https/about only). Refused for heuristic bindings. \
-                Navigation invalidates all p<snapshot>:<index> refs for the tab."
+                Navigation invalidates all p<snapshot>:<index> refs for the tab. \
+                The structured receipt reports status, delivery_mode, dispatched, \
+                activation_state, readback_state, refs_invalidated, and error_code. \
+                Background reports activation_state and readback_state as \
+                not_requested. Foreground activates the exact tab and verifies \
+                frame and loader identity before reporting readback, including \
+                current_url, title, heading, visibility_state, and ready_state. \
+                Stable error codes are navigation_dispatch_failed, \
+                navigation_rejected, target_activation_failed, \
+                navigation_identity_missing, navigation_commit_not_observed, \
+                foreground_readback_failed, foreground_readback_timeout, and \
+                target_drift_after_navigation."
                 .into(),
             input_schema: json!({
                 "type": "object",
