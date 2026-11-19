@@ -1,1 +1,12 @@
-{"signedContributors": []}
+{
+  "signedContributors": [
+    {
+      "name": "loonghao",
+      "id": 13111745,
+      "comment_id": 7001795311,
+      "created_at": "2026-11-19T06:37:47Z",
+      "repoId": 1321517119,
+      "pullRequestNo": 17
+    }
+  ]
+}
