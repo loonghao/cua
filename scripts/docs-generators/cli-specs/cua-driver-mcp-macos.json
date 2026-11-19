@@ -101,6 +101,11 @@
       "description": "Target process ID.",
       "type": "integer"
      },
+     "process_birth_time": {
+      "description": "Optional process creation timestamp from list_windows. Accepted for cross-platform contract parity and ignored on macOS.",
+      "minimum": 0,
+      "type": "integer"
+     },
      "query": {
       "description": "Case-insensitive substring filter: returns matching rows plus ancestors; element_index values are not renumbered. Try this before a full read.",
       "type": "string"

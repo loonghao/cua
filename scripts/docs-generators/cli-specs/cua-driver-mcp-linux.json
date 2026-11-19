@@ -101,6 +101,11 @@
       "description": "Process ID that owns the window.",
       "type": "integer"
      },
+     "process_birth_time": {
+      "description": "Optional process creation timestamp from list_windows. Accepted for cross-platform contract parity and ignored on Linux.",
+      "minimum": 0,
+      "type": "integer"
+     },
      "query": {
       "description": "Optional case-insensitive substring. Projects both tree_markdown and structured elements to matches plus ancestors while preserving original indices. Compare total_element_count with returned_element_count.",
       "type": "string"
